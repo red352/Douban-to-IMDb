@@ -5,7 +5,8 @@
 // @description  Sync Douban movie ratings to IMDb automatically - 自动同步豆瓣电影评分到IMDb
 // @icon         https://pic1.zhimg.com/50/088ce5111d2958266db8675dfdba226c_720w.jpg
 // @include      http*://www.imdb.com/*
-// @include      http*://movie.douban.com/* 
+// @include      http*://movie.douban.com/*
+// @include      http*://search.douban.com/* 
 // @copyright    2019+
 // @run-at       document-idle
 // @grant        GM_addStyle
@@ -1502,16 +1503,80 @@ GM_addStyle(`
     }
 `);
 
-if (location.hostname == 'movie.douban.com') {
+if (location.hostname == 'movie.douban.com' || location.hostname == 'search.douban.com') {
 
     GM_addStyle('#dale_movie_subject_inner_middle{display:none!important}');
+
+    // 豆瓣搜索页面：如果来自 IMDb 或搜索词为 IMDb ID，则自动直达第一条电影详情页
+    if (location.pathname.includes('/subject_search')) {
+        const urlParams = new URLSearchParams(location.search);
+        const searchText = (urlParams.get('search_text') || '').trim();
+        const fromImdb = urlParams.get('from_imdb') === 'true';
+        const isImdbId = /^tt\d+$/i.test(searchText);
+
+        if (fromImdb || isImdbId) {
+            console.log('[Douban to IMDb] 检测到 IMDb ID 搜索，准备自动直达详情页:', searchText);
+            let redirected = false;
+
+            const tryRedirect = function () {
+                if (redirected) return true;
+                
+                const linkSelectors = [
+                    '.item-root a.title-text',
+                    '.item-root a[href*="/subject/"]',
+                    '.result-list a[href*="/subject/"]',
+                    '#root a[href*="/subject/"]'
+                ];
+                
+                for (const selector of linkSelectors) {
+                    const links = document.querySelectorAll(selector);
+                    for (let i = 0; i < links.length; i++) {
+                        const href = links[i].getAttribute('href');
+                        if (href && /\/subject\/\d+/.test(href)) {
+                            redirected = true;
+                            console.log('[Douban to IMDb] 找到目标电影详情页，正在跳转:', href);
+                            window.location.replace(href);
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            };
+
+            if (!tryRedirect()) {
+                let attempts = 0;
+                const maxAttempts = 60; // 最多等待 6 秒 (60 * 100ms)
+                const timer = setInterval(function () {
+                    attempts++;
+                    if (tryRedirect() || attempts >= maxAttempts) {
+                        clearInterval(timer);
+                    }
+                }, 100);
+
+                const observer = new MutationObserver(function () {
+                    if (tryRedirect()) {
+                        observer.disconnect();
+                        clearInterval(timer);
+                    }
+                });
+
+                if (document.body) {
+                    observer.observe(document.body, { childList: true, subtree: true });
+                } else {
+                    document.addEventListener('DOMContentLoaded', function () {
+                        observer.observe(document.body, { childList: true, subtree: true });
+                    });
+                }
+            }
+        }
+    }
     
-    // 在"我看过的电影"页面和搜索页面添加同步按钮
+    // 在"我看过的电影"页面和列表页面添加同步按钮
     if (location.pathname.includes('/mine') || 
         location.pathname.includes('/collect') || 
         location.pathname.includes('/wish') || 
         location.pathname.includes('/people/') ||
-        location.pathname.includes('/search') ||
+        (location.pathname.includes('/search') && !location.pathname.includes('/subject_search')) ||
         location.pathname.includes('/tag/')) {
         // 等待页面加载完成
         setTimeout(function() {
@@ -1931,7 +1996,7 @@ if (location.hostname == 'www.imdb.com') {
         //新版
         let id = location.pathname.split('/')[2]
         window.setTimeout(function () {
-            let doubanLink = 'https://movie.douban.com/subject_search?search_text=' + id
+            let doubanLink = 'https://movie.douban.com/subject_search?search_text=' + id + '&from_imdb=true'
             $('ul[data-testid="hero-subnav-bar-topic-links"]').append('<li role="presentation" class="ipc-inline-list__item"><a target="_blank" href="' + doubanLink + '" class="ipc-link ipc-link--baseAlt ipc-link--inherit-color" data-testid="hero-subnav-bar-imdb-pro-link">Douban</a></li>')
         }, 1000);
 
@@ -2112,7 +2177,7 @@ if (location.hostname == 'www.imdb.com') {
                         }
                     }, CONFIG.IMDB_RATE_CHECK_INTERVAL);
 
-                    $('ul[data-testid="hero-subnav-bar-topic-links"]').append('<li role="presentation" class="ipc-inline-list__item"><a href="https://search.douban.com/movie/subject_search?search_text=' + id + '&cat=1002" class="ipc-link ipc-link--baseAlt ipc-link--inherit-color">Douban</a></li>');
+                    $('ul[data-testid="hero-subnav-bar-topic-links"]').append('<li role="presentation" class="ipc-inline-list__item"><a href="https://movie.douban.com/subject_search?search_text=' + id + '&cat=1002&from_imdb=true" class="ipc-link ipc-link--baseAlt ipc-link--inherit-color">Douban</a></li>');
                 }, CONFIG.IMDB_RATE_SUBMIT_DELAY);
             }
         }
@@ -2144,7 +2209,7 @@ if (location.hostname == 'www.imdb.com') {
 }
 function insertLinks(id, title) {
     var entitle = encodeURIComponent(title)
-    var douban = '<a href="https://movie.douban.com/subject_search?search_text=' + id + '&cat=1002" target="_blank">douban</a>'
+    var douban = '<a href="https://movie.douban.com/subject_search?search_text=' + id + '&cat=1002&from_imdb=true" target="_blank">douban</a>'
     var sub1 = '<a href="https://www.zimuku.org/search?q=' + id + '" target="_blank">zimuku</a>'
     var sub2 = '<a href="https://subhd.tv/search0/' + entitle + '" target="_blank">subhd</a>'
     var dl1 = '<a href="http://search.xiepp.com/search.aspx?q=' + entitle + '" target="_blank">xiepp</a>'
