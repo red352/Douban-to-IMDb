@@ -10,6 +10,11 @@
 // @copyright    2019+
 // @run-at       document-idle
 // @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// @connect      www.imdb.com
+// @connect      movie.douban.com
+// @connect      search.douban.com
+// @connect      doubanio.com
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jquery/3.1.1/jquery.min.js
 // @require      https://cdn.rawgit.com/jprichardson/string.js/master/dist/string.min.js
 // ==/UserScript==
@@ -31,13 +36,497 @@
                 var imdbcode = imdb.textContent.trim(); // like "tt10370822"
                 if (imdbcode && imdbcode.startsWith('tt')) {
                     var imdblink = document.createElement('span');
-                    imdblink.innerHTML = ' <a href="https://www.imdb.com/title/' + imdbcode + '" target="_blank" rel="noopener noreferrer">' + imdbcode + '</a>';
+                    imdblink.innerHTML = ' <a href="https://www.imdb.com/title/' + imdbcode + '" target="_blank" rel="noopener noreferrer" class="douban-imdb-link" data-imdb-id="' + imdbcode + '">' + imdbcode + '</a>';
                     imdb.parentNode.insertBefore(imdblink, imdb);
                     imdb.parentNode.removeChild(imdb);
                     console.log('[Douban to IMDb] IMDb 链接已添加:', imdbcode);
+
+                    var $a = imdblink.querySelector('a');
+                    if ($a) {
+                        bindHoverPreview($a, 'imdb', function() { return imdbcode; });
+                    }
                 }
             }
         }
+    }
+    // ============================================================
+
+    // ==================== Hover 悬停预览功能 ====================
+    const PREVIEW_CACHE = new Map();
+    let previewPopoverEl = null;
+    let hoverHideTimer = null;
+    let hoverShowTimer = null;
+
+    function getOrCreatePreviewCard() {
+        if (!previewPopoverEl) {
+            previewPopoverEl = document.createElement('div');
+            previewPopoverEl.id = 'media-preview-card';
+            previewPopoverEl.className = 'media-preview-card';
+            previewPopoverEl.innerHTML = `
+                <div class="mpc-loading">
+                    <div class="mpc-spinner"></div>
+                    <span>正在加载预览信息...</span>
+                </div>
+                <div class="mpc-content" style="display:none;">
+                    <div class="mpc-poster-wrap">
+                        <img class="mpc-poster" src="" alt="Poster">
+                    </div>
+                    <div class="mpc-info">
+                        <div class="mpc-header">
+                            <span class="mpc-badge"></span>
+                            <span class="mpc-title"></span>
+                        </div>
+                        <div class="mpc-subtitle"></div>
+                        <div class="mpc-rating-row">
+                            <span class="mpc-star">★</span>
+                            <span class="mpc-rating-score"></span>
+                            <span class="mpc-rating-max">/ 10</span>
+                            <span class="mpc-rating-votes"></span>
+                        </div>
+                        <div class="mpc-meta"></div>
+                        <p class="mpc-description"></p>
+                    </div>
+                </div>
+                <div class="mpc-error" style="display:none;">
+                    <span>未找到匹配的电影信息</span>
+                </div>
+            `;
+            document.body.appendChild(previewPopoverEl);
+
+            previewPopoverEl.addEventListener('mouseenter', function() {
+                if (hoverHideTimer) {
+                    clearTimeout(hoverHideTimer);
+                    hoverHideTimer = null;
+                }
+            });
+
+            previewPopoverEl.addEventListener('mouseleave', function() {
+                hidePreviewCard();
+            });
+        }
+        return previewPopoverEl;
+    }
+
+    function positionPreviewCard(targetEl) {
+        const card = getOrCreatePreviewCard();
+        const rect = targetEl.getBoundingClientRect();
+        const cardWidth = 340;
+        const margin = 8;
+
+        let left = rect.left;
+        if (left + cardWidth > window.innerWidth - 12) {
+            left = window.innerWidth - cardWidth - 12;
+        }
+        if (left < 12) left = 12;
+
+        let top = rect.bottom + margin;
+        if (rect.bottom + 220 > window.innerHeight && rect.top > 220) {
+            top = Math.max(10, rect.top - margin - 220);
+        }
+
+        card.style.position = 'fixed';
+        card.style.top = `${top}px`;
+        card.style.left = `${left}px`;
+    }
+
+    function hidePreviewCard() {
+        if (hoverShowTimer) {
+            clearTimeout(hoverShowTimer);
+            hoverShowTimer = null;
+        }
+        hoverHideTimer = setTimeout(function() {
+            if (previewPopoverEl) {
+                previewPopoverEl.classList.remove('mpc-visible');
+            }
+        }, 150);
+    }
+
+    function loadPosterImage($imgEl, url, referer) {
+        if (!url) {
+            $imgEl.hide();
+            return;
+        }
+
+        if (url.startsWith('data:') || url.startsWith('blob:')) {
+            $imgEl.attr('src', url).show();
+            return;
+        }
+
+        // 如果是豆瓣图片，通过 GM_xmlhttpRequest 携带合法 Referer 获取 Blob，彻底避免防盗链 418 报错
+        if (url.includes('doubanio.com') || referer) {
+            const reqReferer = referer || 'https://movie.douban.com/';
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: url,
+                headers: {
+                    'Referer': reqReferer,
+                    'User-Agent': navigator.userAgent
+                },
+                responseType: 'blob',
+                onload: function(response) {
+                    if (response.status === 200 && response.response) {
+                        try {
+                            const blobUrl = URL.createObjectURL(response.response);
+                            $imgEl.attr('src', blobUrl).show();
+                        } catch (e) {
+                            $imgEl.attr('src', url).show();
+                        }
+                    } else {
+                        $imgEl.attr('src', url).show();
+                    }
+                },
+                onerror: function() {
+                    $imgEl.attr('src', url).show();
+                }
+            });
+        } else {
+            $imgEl.attr('src', url).show();
+        }
+    }
+
+    function renderPreviewCard(data) {
+        const card = getOrCreatePreviewCard();
+        const $card = $(card);
+        $card.find('.mpc-loading').hide();
+        $card.find('.mpc-error').hide();
+
+        if (!data) {
+            $card.find('.mpc-error').show();
+            return;
+        }
+
+        $card.find('.mpc-badge').text(data.source || 'IMDb').removeClass('imdb douban').addClass(data.sourceClass || 'imdb');
+        $card.find('.mpc-title').text(data.title || '未知片名').attr('title', data.title || '');
+        if (data.subTitle) {
+            $card.find('.mpc-subtitle').text(data.subTitle).show();
+        } else {
+            $card.find('.mpc-subtitle').hide();
+        }
+
+        if (data.rating) {
+            $card.find('.mpc-rating-row').show();
+            $card.find('.mpc-rating-score').text(data.rating);
+            $card.find('.mpc-rating-votes').text(data.votes ? `(${data.votes})` : '');
+        } else {
+            $card.find('.mpc-rating-row').hide();
+        }
+
+        if (data.meta) {
+            $card.find('.mpc-meta').text(data.meta).show();
+        } else {
+            $card.find('.mpc-meta').hide();
+        }
+
+        if (data.description) {
+            $card.find('.mpc-description').text(data.description).show();
+        } else {
+            $card.find('.mpc-description').hide();
+        }
+
+        const $poster = $card.find('.mpc-poster');
+        if (data.poster) {
+            loadPosterImage($poster, data.poster, data.sourceClass === 'douban' ? 'https://movie.douban.com/' : 'https://www.imdb.com/');
+            $card.find('.mpc-poster-wrap').show();
+        } else {
+            $card.find('.mpc-poster-wrap').hide();
+        }
+
+        $card.find('.mpc-content').show();
+    }
+
+    function fetchImdbPreview(imdbId, callback) {
+        const cacheKey = 'imdb_' + imdbId;
+        if (PREVIEW_CACHE.has(cacheKey)) {
+            callback(PREVIEW_CACHE.get(cacheKey));
+            return;
+        }
+
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: 'https://www.imdb.com/title/' + imdbId + '/',
+            headers: {
+                'Accept-Language': 'en-US,en;q=0.9',
+                'User-Agent': navigator.userAgent
+            },
+            onload: function(response) {
+                try {
+                    const html = response.responseText;
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(html, 'text/html');
+
+                    let data = null;
+                    const ldScript = doc.querySelector('script[type="application/ld+json"]');
+                    if (ldScript) {
+                        try {
+                            const json = JSON.parse(ldScript.textContent);
+                            data = {
+                                source: 'IMDb',
+                                sourceClass: 'imdb',
+                                title: json.name || imdbId,
+                                subTitle: json.alternateName || '',
+                                poster: json.image || '',
+                                rating: json.aggregateRating ? json.aggregateRating.ratingValue : null,
+                                votes: json.aggregateRating ? `${Number(json.aggregateRating.ratingCount).toLocaleString()} 评价` : null,
+                                meta: [
+                                    json.datePublished ? json.datePublished.substring(0, 4) : '',
+                                    Array.isArray(json.genre) ? json.genre.slice(0, 3).join(' / ') : json.genre
+                                ].filter(Boolean).join(' • '),
+                                description: json.description ? S(json.description).unescapeHTML().s : ''
+                            };
+                        } catch (e) {
+                            console.error('[Preview] 解析 IMDb JSON-LD 失败:', e);
+                        }
+                    }
+
+                    if (!data) {
+                        const title = doc.querySelector('h1[data-testid="hero__pageTitle"]')?.textContent?.trim() || imdbId;
+                        const rating = doc.querySelector('div[data-testid="hero-rating-bar__aggregate-rating__score"] span')?.textContent?.trim() || '';
+                        const poster = doc.querySelector('img.ipc-image')?.getAttribute('src') || '';
+                        data = {
+                            source: 'IMDb',
+                            sourceClass: 'imdb',
+                            title: title,
+                            subTitle: '',
+                            poster: poster,
+                            rating: rating,
+                            votes: '',
+                            meta: '',
+                            description: ''
+                        };
+                    }
+
+                    PREVIEW_CACHE.set(cacheKey, data);
+                    callback(data);
+                } catch (err) {
+                    console.error('[Preview] 请求 IMDb 失败:', err);
+                    callback(null);
+                }
+            },
+            onerror: function(err) {
+                console.error('[Preview] 网络请求 IMDb 异常:', err);
+                callback(null);
+            }
+        });
+    }
+
+    function getImdbPageMediaInfo() {
+        let title = $('h1[data-testid="hero__pageTitle"]').text().trim();
+        let year = '';
+
+        const metaText = $('ul.ipc-inline-list--show-dividers').first().text();
+        const yearMatch = metaText ? metaText.match(/\b(19\d\d|20\d\d)\b/) : null;
+        if (yearMatch) {
+            year = yearMatch[1];
+        }
+
+        if (!title) {
+            const docTitle = document.title || '';
+            const match = docTitle.match(/^(.*?)\s*\((\d{4})\)/);
+            if (match) {
+                title = match[1].trim();
+                year = match[2];
+            } else {
+                title = docTitle.replace(/ - IMDb.*$/i, '').trim();
+            }
+        }
+        return { title: title, year: year };
+    }
+
+    function splitDoubanTitle(rawTitle) {
+        let clean = (rawTitle || '').replace(/\u200e/g, '').trim();
+        const match = clean.match(/^([\u4e00-\u9fa5\d\s·：:！!？?·\-—～~]+?)\s+([A-Za-z0-9\s:·'’\-—.,!?~]+(?:\s*\(\d{4}\))?)$/);
+        if (match && match[1] && match[2]) {
+            return {
+                title: match[1].trim(),
+                subTitle: match[2].trim()
+            };
+        }
+        return {
+            title: clean,
+            subTitle: ''
+        };
+    }
+
+    function fetchDoubanPreview(params, callback) {
+        let imdbId = '';
+        let queryTitle = '';
+        let queryYear = '';
+
+        if (typeof params === 'object' && params !== null) {
+            imdbId = params.imdbId || '';
+            queryTitle = params.title || '';
+            queryYear = params.year || '';
+        } else if (typeof params === 'string') {
+            imdbId = params;
+        }
+
+        const cacheKey = 'douban_' + (imdbId || queryTitle);
+        if (PREVIEW_CACHE.has(cacheKey)) {
+            callback(PREVIEW_CACHE.get(cacheKey));
+            return;
+        }
+
+        // 优先方案：直接通过 IMDb ID 请求豆瓣搜索页，提取精准明文数据 window.__DATA__
+        if (imdbId && /^tt\d+$/i.test(imdbId.trim())) {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: 'https://movie.douban.com/subject_search?search_text=' + encodeURIComponent(imdbId.trim()) + '&cat=1002',
+                headers: {
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'User-Agent': navigator.userAgent,
+                    'Referer': 'https://movie.douban.com/'
+                },
+                onload: function(response) {
+                    try {
+                        const html = response.responseText;
+                        const match = html.match(/window\.__DATA__\s*=\s*(\{[\s\S]*?\});/);
+                        if (match) {
+                            const dataJson = JSON.parse(match[1]);
+                            if (dataJson.items && dataJson.items.length > 0) {
+                                const item = dataJson.items[0];
+                                const parsed = splitDoubanTitle(item.title);
+
+                                const data = {
+                                    source: '豆瓣电影',
+                                    sourceClass: 'douban',
+                                    title: parsed.title || imdbId,
+                                    subTitle: parsed.subTitle,
+                                    poster: item.cover_url || '',
+                                    rating: item.rating && item.rating.value ? item.rating.value.toFixed(1) : null,
+                                    votes: item.rating && item.rating.count ? `${Number(item.rating.count).toLocaleString()} 评价` : null,
+                                    meta: item.abstract || '',
+                                    description: item.abstract_2 || ''
+                                };
+
+                                PREVIEW_CACHE.set(cacheKey, data);
+                                callback(data);
+                                return;
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('[Preview] 解析豆瓣搜索页 __DATA__ 失败，尝试回退:', e);
+                    }
+
+                    // 如果 __DATA__ 解析未果，回退到 suggest 接口
+                    fallbackDoubanSuggest(imdbId, queryTitle, queryYear, cacheKey, callback);
+                },
+                onerror: function(err) {
+                    console.warn('[Preview] 请求豆瓣搜索页异常，尝试回退:', err);
+                    fallbackDoubanSuggest(imdbId, queryTitle, queryYear, cacheKey, callback);
+                }
+            });
+            return;
+        }
+
+        fallbackDoubanSuggest(imdbId, queryTitle, queryYear, cacheKey, callback);
+    }
+
+    function fallbackDoubanSuggest(imdbId, queryTitle, queryYear, cacheKey, callback) {
+        if (!queryTitle) {
+            const pageInfo = getImdbPageMediaInfo();
+            queryTitle = pageInfo.title;
+            if (!queryYear) queryYear = pageInfo.year;
+        }
+
+        const searchQuery = queryTitle || imdbId;
+        if (!searchQuery) {
+            callback(null);
+            return;
+        }
+
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: 'https://movie.douban.com/j/subject_suggest?q=' + encodeURIComponent(searchQuery),
+            headers: {
+                'Accept': 'application/json, text/javascript, */*; q=0.01',
+                'User-Agent': navigator.userAgent
+            },
+            onload: function(response) {
+                try {
+                    const list = JSON.parse(response.responseText);
+                    if (Array.isArray(list) && list.length > 0) {
+                        let matched = list[0];
+                        if (queryYear) {
+                            const yearMatched = list.find(function(item) {
+                                return item.year && String(item.year).trim() === String(queryYear).trim();
+                            });
+                            if (yearMatched) matched = yearMatched;
+                        }
+
+                        const data = {
+                            source: '豆瓣电影',
+                            sourceClass: 'douban',
+                            title: matched.title,
+                            subTitle: matched.sub_title || '',
+                            poster: matched.img || '',
+                            rating: null,
+                            votes: null,
+                            meta: matched.year ? `${matched.year} 年` : '',
+                            description: ''
+                        };
+
+                        PREVIEW_CACHE.set(cacheKey, data);
+                        callback(data);
+                    } else {
+                        callback(null);
+                    }
+                } catch (err) {
+                    console.error('[Preview] 豆瓣备用查询失败:', err);
+                    callback(null);
+                }
+            },
+            onerror: function(err) {
+                console.error('[Preview] 豆瓣备用请求异常:', err);
+                callback(null);
+            }
+        });
+    }
+
+    function bindHoverPreview(element, type, getInfoFn) {
+        if (!element) return;
+        const $el = $(element);
+
+        $el.on('mouseenter', function() {
+            if (hoverHideTimer) {
+                clearTimeout(hoverHideTimer);
+                hoverHideTimer = null;
+            }
+
+            const info = typeof getInfoFn === 'function' ? getInfoFn($el) : $el.data('imdbId');
+            if (!info) return;
+
+            hoverShowTimer = setTimeout(function() {
+                const card = getOrCreatePreviewCard();
+                const $card = $(card);
+                $card.find('.mpc-loading').show();
+                $card.find('.mpc-content').hide();
+                $card.find('.mpc-error').hide();
+
+                positionPreviewCard($el[0]);
+                card.classList.add('mpc-visible');
+
+                if (type === 'imdb') {
+                    const id = typeof info === 'object' ? info.imdbId : info;
+                    fetchImdbPreview(id, function(data) {
+                        if (card.classList.contains('mpc-visible')) {
+                            renderPreviewCard(data);
+                            positionPreviewCard($el[0]);
+                        }
+                    });
+                } else if (type === 'douban') {
+                    fetchDoubanPreview(info, function(data) {
+                        if (card.classList.contains('mpc-visible')) {
+                            renderPreviewCard(data);
+                            positionPreviewCard($el[0]);
+                        }
+                    });
+                }
+            }, 250);
+        });
+
+        $el.on('mouseleave', function() {
+            hidePreviewCard();
+        });
     }
     // ============================================================
     
@@ -1501,6 +1990,193 @@ GM_addStyle(`
     .sync-progress-btn.secondary:hover {
         background: #e8e8e8;
     }
+
+    /* ==================== 悬停预览卡片 Popover 样式 ==================== */
+    .media-preview-card {
+        position: fixed;
+        z-index: 9999999;
+        width: 330px;
+        background: #ffffff;
+        color: #1a1a1a;
+        border-radius: 10px;
+        box-shadow: 0 12px 36px rgba(0, 0, 0, 0.2), 0 0 1px rgba(0, 0, 0, 0.15);
+        padding: 12px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        font-size: 13px;
+        line-height: 1.45;
+        opacity: 0;
+        visibility: hidden;
+        transform: translateY(6px);
+        transition: opacity 0.2s ease, transform 0.2s ease, visibility 0.2s;
+        pointer-events: auto;
+        border: 1px solid rgba(0, 0, 0, 0.08);
+        box-sizing: border-box;
+    }
+
+    .media-preview-card * {
+        box-sizing: border-box;
+    }
+
+    .media-preview-card.mpc-visible {
+        opacity: 1;
+        visibility: visible;
+        transform: translateY(0);
+    }
+
+    .mpc-loading, .mpc-error {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 24px 10px;
+        color: #666;
+        font-size: 12px;
+    }
+
+    .mpc-spinner {
+        width: 16px;
+        height: 16px;
+        border: 2px solid #e0e0e0;
+        border-top-color: #3377aa;
+        border-radius: 50%;
+        animation: mpc-spin 0.7s linear infinite;
+    }
+
+    @keyframes mpc-spin {
+        to { transform: rotate(360deg); }
+    }
+
+    .mpc-content {
+        display: flex;
+        gap: 12px;
+    }
+
+    .mpc-poster-wrap {
+        flex-shrink: 0;
+        width: 80px;
+        height: 116px;
+        border-radius: 6px;
+        overflow: hidden;
+        background: #eee;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+    }
+
+    .mpc-poster {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+    }
+
+    .mpc-info {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+    }
+
+    .mpc-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 2px;
+        width: 100%;
+        min-width: 0;
+    }
+
+    .mpc-badge {
+        display: inline-block;
+        flex-shrink: 0;
+        white-space: nowrap;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        line-height: 1.2;
+        height: fit-content;
+        box-sizing: border-box;
+    }
+
+    .mpc-badge.imdb {
+        background: #f5c518;
+        color: #000000;
+    }
+
+    .mpc-badge.douban {
+        background: #007722;
+        color: #ffffff;
+    }
+
+    .mpc-title {
+        font-size: 14px;
+        font-weight: 600;
+        color: #111;
+        margin: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        min-width: 0;
+        flex: 1;
+    }
+
+    .mpc-subtitle {
+        font-size: 11px;
+        color: #777;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        margin-bottom: 4px;
+        min-width: 0;
+        width: 100%;
+    }
+
+    .mpc-rating-row {
+        display: flex;
+        align-items: baseline;
+        gap: 4px;
+        margin-bottom: 4px;
+    }
+
+    .mpc-star {
+        color: #f5a623;
+        font-size: 14px;
+    }
+
+    .mpc-rating-score {
+        font-size: 15px;
+        font-weight: 700;
+        color: #e09015;
+    }
+
+    .mpc-rating-max {
+        font-size: 11px;
+        color: #999;
+    }
+
+    .mpc-rating-votes {
+        font-size: 11px;
+        color: #888;
+        margin-left: 4px;
+    }
+
+    .mpc-meta {
+        font-size: 11px;
+        color: #666;
+        margin-bottom: 6px;
+    }
+
+    .mpc-description {
+        font-size: 11px;
+        color: #555;
+        line-height: 1.4;
+        margin: 0;
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+    }
 `);
 
 if (location.hostname == 'movie.douban.com' || location.hostname == 'search.douban.com') {
@@ -1996,8 +2672,10 @@ if (location.hostname == 'www.imdb.com') {
         //新版
         let id = location.pathname.split('/')[2]
         window.setTimeout(function () {
-            let doubanLink = 'https://movie.douban.com/subject_search?search_text=' + id + '&from_imdb=true'
-            $('ul[data-testid="hero-subnav-bar-topic-links"]').append('<li role="presentation" class="ipc-inline-list__item"><a target="_blank" href="' + doubanLink + '" class="ipc-link ipc-link--baseAlt ipc-link--inherit-color" data-testid="hero-subnav-bar-imdb-pro-link">Douban</a></li>')
+            let doubanLink = 'https://movie.douban.com/subject_search?search_text=' + id + '&from_imdb=true';
+            let $doubanBtn = $('<li role="presentation" class="ipc-inline-list__item"><a target="_blank" href="' + doubanLink + '" class="ipc-link ipc-link--baseAlt ipc-link--inherit-color douban-preview-link" data-imdb-id="' + id + '" data-testid="hero-subnav-bar-imdb-pro-link">Douban</a></li>');
+            $('ul[data-testid="hero-subnav-bar-topic-links"]').append($doubanBtn);
+            bindHoverPreview($doubanBtn.find('a')[0], 'douban', function() { return id; });
         }, 1000);
 
         // 解析 hash: #10-watchlist-batch-1770416024180-1-30455615
@@ -2177,7 +2855,9 @@ if (location.hostname == 'www.imdb.com') {
                         }
                     }, CONFIG.IMDB_RATE_CHECK_INTERVAL);
 
-                    $('ul[data-testid="hero-subnav-bar-topic-links"]').append('<li role="presentation" class="ipc-inline-list__item"><a href="https://movie.douban.com/subject_search?search_text=' + id + '&cat=1002&from_imdb=true" class="ipc-link ipc-link--baseAlt ipc-link--inherit-color">Douban</a></li>');
+                    let $doubanBtn2 = $('<li role="presentation" class="ipc-inline-list__item"><a href="https://movie.douban.com/subject_search?search_text=' + id + '&cat=1002&from_imdb=true" class="ipc-link ipc-link--baseAlt ipc-link--inherit-color douban-preview-link" data-imdb-id="' + id + '">Douban</a></li>');
+                    $('ul[data-testid="hero-subnav-bar-topic-links"]').append($doubanBtn2);
+                    bindHoverPreview($doubanBtn2.find('a')[0], 'douban', function() { return id; });
                 }, CONFIG.IMDB_RATE_SUBMIT_DELAY);
             }
         }
@@ -2201,15 +2881,25 @@ if (location.hostname == 'www.imdb.com') {
             $(this).attr('target', '_blank')
         })
         $('.lister-item-header').each(function () {
-            var title = $(this).find('a').text() + ' ' + $(this).find('.lister-item-year').text()
-            var id = $(this).find('a').attr('href').split('/')[2]
-            $(this).parent().after(insertLinks(id, title))
+            var rawTitle = $(this).find('a').text().trim();
+            var yearText = $(this).find('.lister-item-year').text();
+            var yearMatch = yearText ? yearText.match(/\b(19\d\d|20\d\d)\b/) : null;
+            var year = yearMatch ? yearMatch[1] : '';
+            var title = rawTitle + (year ? ' ' + year : '');
+            var id = $(this).find('a').attr('href').split('/')[2];
+            var $links = $(insertLinks(id, title));
+            $(this).parent().after($links);
+            $links.find('.douban-preview-link').each(function() {
+                bindHoverPreview(this, 'douban', function() {
+                    return { imdbId: id, title: rawTitle, year: year };
+                });
+            });
         })
     }
 }
 function insertLinks(id, title) {
     var entitle = encodeURIComponent(title)
-    var douban = '<a href="https://movie.douban.com/subject_search?search_text=' + id + '&cat=1002&from_imdb=true" target="_blank">douban</a>'
+    var douban = '<a href="https://movie.douban.com/subject_search?search_text=' + id + '&cat=1002&from_imdb=true" target="_blank" class="douban-preview-link" data-imdb-id="' + id + '">douban</a>'
     var sub1 = '<a href="https://www.zimuku.org/search?q=' + id + '" target="_blank">zimuku</a>'
     var sub2 = '<a href="https://subhd.tv/search0/' + entitle + '" target="_blank">subhd</a>'
     var dl1 = '<a href="http://search.xiepp.com/search.aspx?q=' + entitle + '" target="_blank">xiepp</a>'
