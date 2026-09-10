@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Douban to IMDb
-// @version      2026.02.07
+// @version      2026.09.10
 // @author       ryen
 // @description  Sync Douban movie ratings to IMDb automatically - 自动同步豆瓣电影评分到IMDb
 // @icon         https://pic1.zhimg.com/50/088ce5111d2958266db8675dfdba226c_720w.jpg
@@ -12,6 +12,9 @@
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
 // @connect      www.imdb.com
+// @connect      imdb.com
+// @connect      *.imdb.com
+// @connect      v3.sg.media-imdb.com
 // @connect      movie.douban.com
 // @connect      search.douban.com
 // @connect      doubanio.com
@@ -44,6 +47,7 @@
                     var $a = imdblink.querySelector('a');
                     if ($a) {
                         bindHoverPreview($a, 'imdb', function() { return imdbcode; });
+                        preloadPreview('imdb', imdbcode);
                     }
                 }
             }
@@ -53,9 +57,86 @@
 
     // ==================== Hover 悬停预览功能 ====================
     const PREVIEW_CACHE = new Map();
+    const PREVIEW_STORAGE_KEY = 'douban_imdb_preview_cache_v2';
+    const CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7天缓存
     let previewPopoverEl = null;
     let hoverHideTimer = null;
     let hoverShowTimer = null;
+    let currentPreviewRequestId = 0;
+
+    // 数据合法性校验：严禁只有 ID、没有实质内容的残缺数据进入系统或缓存
+    function isValidPreviewData(data) {
+        if (!data || typeof data !== 'object') return false;
+        if (!data.title) return false;
+        const cleanTitle = String(data.title).trim();
+        if (/^tt\d+$/i.test(cleanTitle) && !data.poster && !data.rating && !data.meta && !data.description) {
+            return false;
+        }
+        return true;
+    }
+
+    // 初始化二级持久化缓存（从 localStorage 恢复）
+    (function initPreviewCache() {
+        try {
+            const raw = localStorage.getItem(PREVIEW_STORAGE_KEY);
+            if (!raw) return;
+            const parsed = JSON.parse(raw);
+            const now = Date.now();
+            for (const key of Object.keys(parsed)) {
+                const item = parsed[key];
+                if (item && item.data && (now - item.timestamp < CACHE_TTL)) {
+                    if (isValidPreviewData(item.data)) {
+                        PREVIEW_CACHE.set(key, item.data);
+                    }
+                }
+            }
+        } catch (e) {
+            // 忽略存储读取异常
+        }
+    })();
+
+    // 将内存缓存持久化到 localStorage（限制条目上限，防膨胀）
+    function saveCacheToStorage() {
+        try {
+            const cacheObj = {};
+            const now = Date.now();
+            let count = 0;
+            const maxEntries = 120;
+            for (const [key, data] of PREVIEW_CACHE.entries()) {
+                if (isValidPreviewData(data) && !data.isPartial) {
+                    cacheObj[key] = {
+                        data: data,
+                        timestamp: now
+                    };
+                    count++;
+                    if (count >= maxEntries) break;
+                }
+            }
+            localStorage.setItem(PREVIEW_STORAGE_KEY, JSON.stringify(cacheObj));
+        } catch (e) {
+            // 忽略存储写入异常
+        }
+    }
+
+    // 获取当前豆瓣电影详情页的上下文（用于给 IMDb 预览卡片补充中文对照副标题）
+    function getDoubanPageContext() {
+        if (!location.hostname.includes('douban.com')) {
+            return { chineseTitle: '' };
+        }
+        try {
+            const h1El = document.querySelector('#content h1');
+            if (h1El) {
+                const titleSpan = h1El.querySelector('[property="v:itemreviewed"]');
+                const fullText = titleSpan ? titleSpan.textContent.trim() : h1El.textContent.trim();
+                const match = fullText.match(/^([^\w\d\(\)]+)/);
+                if (match && match[1]) {
+                    return { chineseTitle: match[1].trim() };
+                }
+                return { chineseTitle: fullText.split(' ')[0] || '' };
+            }
+        } catch (e) {}
+        return { chineseTitle: '' };
+    }
 
     function getOrCreatePreviewCard() {
         if (!previewPopoverEl) {
@@ -88,7 +169,7 @@
                     </div>
                 </div>
                 <div class="mpc-error" style="display:none;">
-                    <span>未找到匹配的电影信息</span>
+                    <span>暂未获取到预览信息，可尝试刷新</span>
                 </div>
             `;
             document.body.appendChild(previewPopoverEl);
@@ -108,6 +189,7 @@
     }
 
     function positionPreviewCard(targetEl) {
+        if (!targetEl) return;
         const card = getOrCreatePreviewCard();
         const rect = targetEl.getBoundingClientRect();
         const cardWidth = 340;
@@ -119,9 +201,10 @@
         }
         if (left < 12) left = 12;
 
+        const cardHeight = card.offsetHeight || 220;
         let top = rect.bottom + margin;
-        if (rect.bottom + 220 > window.innerHeight && rect.top > 220) {
-            top = Math.max(10, rect.top - margin - 220);
+        if (rect.bottom + cardHeight > window.innerHeight && rect.top > cardHeight) {
+            top = Math.max(10, rect.top - margin - cardHeight);
         }
 
         card.style.position = 'fixed';
@@ -152,7 +235,19 @@
             return;
         }
 
-        // 如果是豆瓣图片，通过 GM_xmlhttpRequest 携带合法 Referer 获取 Blob，彻底避免防盗链 418 报错
+        // Amazon / IMDb 原生海报 CDN 支持直链，且支持跨域，走原生加载享受极速并行下载与 HTTP 强缓存
+        if (url.includes('media-amazon.com') || url.includes('imdb.com')) {
+            $imgEl.attr('src', url).show();
+            return;
+        }
+
+        // 豆瓣本站访问豆瓣图片，直接原生加载即可
+        if (location.hostname.includes('douban.com') && url.includes('doubanio.com')) {
+            $imgEl.attr('src', url).show();
+            return;
+        }
+
+        // 跨域豆瓣图片（在 IMDb 站内），通过 GM_xmlhttpRequest 携带合法 Referer 获取 Blob 彻底规避 418 防盗链
         if (url.includes('doubanio.com') || referer) {
             const reqReferer = referer || 'https://movie.douban.com/';
             GM_xmlhttpRequest({
@@ -163,6 +258,7 @@
                     'User-Agent': navigator.userAgent
                 },
                 responseType: 'blob',
+                timeout: 5000,
                 onload: function(response) {
                     if (response.status === 200 && response.response) {
                         try {
@@ -177,6 +273,9 @@
                 },
                 onerror: function() {
                     $imgEl.attr('src', url).show();
+                },
+                ontimeout: function() {
+                    $imgEl.attr('src', url).show();
                 }
             });
         } else {
@@ -187,16 +286,20 @@
     function renderPreviewCard(data) {
         const card = getOrCreatePreviewCard();
         const $card = $(card);
-        $card.find('.mpc-loading').hide();
-        $card.find('.mpc-error').hide();
 
-        if (!data) {
+        if (!data || !isValidPreviewData(data)) {
+            $card.find('.mpc-loading').hide();
+            $card.find('.mpc-content').hide();
             $card.find('.mpc-error').show();
             return;
         }
 
+        $card.find('.mpc-loading').hide();
+        $card.find('.mpc-error').hide();
+
         $card.find('.mpc-badge').text(data.source || 'IMDb').removeClass('imdb douban').addClass(data.sourceClass || 'imdb');
         $card.find('.mpc-title').text(data.title || '未知片名').attr('title', data.title || '');
+
         if (data.subTitle) {
             $card.find('.mpc-subtitle').text(data.subTitle).show();
         } else {
@@ -234,79 +337,233 @@
         $card.find('.mpc-content').show();
     }
 
+    // 双轨渐进式获取 IMDb 信息：轻量 CDN Suggestion API 极速响应 + 完整详情页解析评分
     function fetchImdbPreview(imdbId, callback) {
-        const cacheKey = 'imdb_' + imdbId;
-        if (PREVIEW_CACHE.has(cacheKey)) {
-            callback(PREVIEW_CACHE.get(cacheKey));
+        imdbId = (imdbId || '').trim();
+        if (!imdbId) {
+            callback(null);
             return;
         }
 
-        GM_xmlhttpRequest({
-            method: 'GET',
-            url: 'https://www.imdb.com/title/' + imdbId + '/',
-            headers: {
-                'Accept-Language': 'en-US,en;q=0.9',
-                'User-Agent': navigator.userAgent
-            },
-            onload: function(response) {
-                try {
-                    const html = response.responseText;
-                    const parser = new DOMParser();
-                    const doc = parser.parseFromString(html, 'text/html');
+        const cacheKey = 'imdb_' + imdbId;
+        const cached = PREVIEW_CACHE.get(cacheKey);
+        // 若有完整（非 partial）有效缓存，直接同步返回
+        if (cached && !cached.isPartial && isValidPreviewData(cached)) {
+            callback(cached);
+            return;
+        }
 
-                    let data = null;
-                    const ldScript = doc.querySelector('script[type="application/ld+json"]');
-                    if (ldScript) {
-                        try {
-                            const json = JSON.parse(ldScript.textContent);
-                            data = {
-                                source: 'IMDb',
-                                sourceClass: 'imdb',
-                                title: json.name || imdbId,
-                                subTitle: json.alternateName || '',
-                                poster: json.image || '',
-                                rating: json.aggregateRating ? json.aggregateRating.ratingValue : null,
-                                votes: json.aggregateRating ? `${Number(json.aggregateRating.ratingCount).toLocaleString()} 评价` : null,
-                                meta: [
-                                    json.datePublished ? json.datePublished.substring(0, 4) : '',
-                                    Array.isArray(json.genre) ? json.genre.slice(0, 3).join(' / ') : json.genre
-                                ].filter(Boolean).join(' • '),
-                                description: json.description ? S(json.description).unescapeHTML().s : ''
-                            };
-                        } catch (e) {
-                            console.error('[Preview] 解析 IMDb JSON-LD 失败:', e);
-                        }
-                    }
+        let suggestionDone = false;
+        let detailDone = false;
+        let currentBestData = (cached && isValidPreviewData(cached)) ? Object.assign({}, cached) : null;
+        const doubanContext = getDoubanPageContext();
 
-                    if (!data) {
-                        const title = doc.querySelector('h1[data-testid="hero__pageTitle"]')?.textContent?.trim() || imdbId;
-                        const rating = doc.querySelector('div[data-testid="hero-rating-bar__aggregate-rating__score"] span')?.textContent?.trim() || '';
-                        const poster = doc.querySelector('img.ipc-image')?.getAttribute('src') || '';
-                        data = {
-                            source: 'IMDb',
-                            sourceClass: 'imdb',
-                            title: title,
-                            subTitle: '',
-                            poster: poster,
-                            rating: rating,
-                            votes: '',
-                            meta: '',
-                            description: ''
-                        };
-                    }
-
-                    PREVIEW_CACHE.set(cacheKey, data);
-                    callback(data);
-                } catch (err) {
-                    console.error('[Preview] 请求 IMDb 失败:', err);
+        const checkCompletion = function() {
+            if (suggestionDone && detailDone) {
+                if (currentBestData && isValidPreviewData(currentBestData)) {
+                    PREVIEW_CACHE.set(cacheKey, currentBestData);
+                    saveCacheToStorage();
+                    callback(currentBestData);
+                } else {
                     callback(null);
                 }
-            },
-            onerror: function(err) {
-                console.error('[Preview] 网络请求 IMDb 异常:', err);
-                callback(null);
             }
-        });
+        };
+
+        // 轨道 1：IMDb 官方全球 CloudFront CDN Suggestion API（100-200ms，极速稳定，免 WAF 挑战）
+        const reqSuggestion = function() {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: 'https://v3.sg.media-imdb.com/suggestion/t/' + encodeURIComponent(imdbId) + '.json',
+                headers: {
+                    'Accept': 'application/json, text/plain, */*'
+                },
+                timeout: 3000,
+                onload: function(res) {
+                    suggestionDone = true;
+                    if (res.status === 200 && res.responseText) {
+                        try {
+                            const json = JSON.parse(res.responseText);
+                            if (json.d && Array.isArray(json.d) && json.d.length > 0) {
+                                const item = json.d.find(function(it) { return it.id === imdbId; }) || json.d[0];
+                                if (item && item.l) {
+                                    const metaParts = [];
+                                    if (item.y) metaParts.push(String(item.y));
+                                    if (item.qid === 'tvSeries') {
+                                        metaParts.push('剧集');
+                                    } else if (item.q === 'feature' || item.qid === 'movie') {
+                                        metaParts.push('电影');
+                                    } else if (item.q) {
+                                        metaParts.push(item.q);
+                                    }
+                                    if (item.s) metaParts.push(item.s);
+
+                                    const sData = {
+                                        source: 'IMDb',
+                                        sourceClass: 'imdb',
+                                        title: item.l,
+                                        subTitle: doubanContext.chineseTitle || '',
+                                        poster: item.i ? item.i.imageUrl : '',
+                                        rating: null,
+                                        votes: null,
+                                        meta: metaParts.join(' • '),
+                                        description: '',
+                                        isPartial: true
+                                    };
+
+                                    // 如果此时完整详情尚未到达，先回传基础卡片（迅速呈现海报、标题、年份与主演）
+                                    if (!detailDone) {
+                                        currentBestData = Object.assign({}, currentBestData || {}, sData);
+                                        PREVIEW_CACHE.set(cacheKey, currentBestData);
+                                        callback(currentBestData, true);
+                                    }
+                                    return;
+                                }
+                            }
+                        } catch (e) {
+                            console.warn('[Preview] 解析 IMDb Suggestion 异常:', e);
+                        }
+                    }
+                    checkCompletion();
+                },
+                onerror: function() {
+                    suggestionDone = true;
+                    checkCompletion();
+                },
+                ontimeout: function() {
+                    suggestionDone = true;
+                    checkCompletion();
+                }
+            });
+        };
+
+        // 轨道 2：IMDb 完整页面请求（提取真实评分、评价人数与剧情简介）
+        const reqDetail = function() {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: 'https://www.imdb.com/title/' + imdbId + '/',
+                headers: {
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+                    'Referer': 'https://www.imdb.com/',
+                    'User-Agent': navigator.userAgent
+                },
+                timeout: 4200,
+                onload: function(response) {
+                    detailDone = true;
+                    // 严格检验状态码与返回内容长度：非 200 或被 WAF 挑战页（如 202/403 等）坚决不当做有效页面
+                    if (response.status === 200 && response.responseText && response.responseText.length > 1500) {
+                        try {
+                            const html = response.responseText;
+                            const parser = new DOMParser();
+                            const doc = parser.parseFromString(html, 'text/html');
+
+                            let parsedData = null;
+                            const ldScript = doc.querySelector('script[type="application/ld+json"]');
+                            if (ldScript) {
+                                try {
+                                    const json = JSON.parse(ldScript.textContent);
+                                    if (json.name) {
+                                        parsedData = {
+                                            source: 'IMDb',
+                                            sourceClass: 'imdb',
+                                            title: json.name,
+                                            subTitle: doubanContext.chineseTitle || json.alternateName || '',
+                                            poster: json.image || '',
+                                            rating: json.aggregateRating ? String(json.aggregateRating.ratingValue) : null,
+                                            votes: json.aggregateRating ? `${Number(json.aggregateRating.ratingCount).toLocaleString()} 评价` : null,
+                                            meta: [
+                                                json.datePublished ? json.datePublished.substring(0, 4) : '',
+                                                Array.isArray(json.genre) ? json.genre.slice(0, 3).join(' / ') : json.genre
+                                            ].filter(Boolean).join(' • '),
+                                            description: json.description ? S(json.description).unescapeHTML().s : '',
+                                            isPartial: false
+                                        };
+                                    }
+                                } catch (e) {
+                                    console.warn('[Preview] 解析 IMDb JSON-LD 异常:', e);
+                                }
+                            }
+
+                            // 备用 2.1：从 __NEXT_DATA__ 解析
+                            if (!parsedData) {
+                                const nextScript = doc.querySelector('script#__NEXT_DATA__');
+                                if (nextScript) {
+                                    try {
+                                        const nextJson = JSON.parse(nextScript.textContent);
+                                        const titleData = nextJson.props?.pageProps?.aboveTheFoldData;
+                                        if (titleData && titleData.titleText?.text) {
+                                            parsedData = {
+                                                source: 'IMDb',
+                                                sourceClass: 'imdb',
+                                                title: titleData.titleText.text,
+                                                subTitle: doubanContext.chineseTitle || titleData.originalTitleText?.text || '',
+                                                poster: titleData.primaryImage?.url || '',
+                                                rating: titleData.ratingsSummary?.aggregateRating ? String(titleData.ratingsSummary.aggregateRating) : null,
+                                                votes: titleData.ratingsSummary?.voteCount ? `${Number(titleData.ratingsSummary.voteCount).toLocaleString()} 评价` : null,
+                                                meta: [
+                                                    titleData.releaseYear?.year ? String(titleData.releaseYear.year) : '',
+                                                    titleData.genres?.genres?.map(function(g) { return g.text; }).slice(0, 3).join(' / ') || ''
+                                                ].filter(Boolean).join(' • '),
+                                                description: titleData.plot?.plotText?.plainText || '',
+                                                isPartial: false
+                                            };
+                                        }
+                                    } catch (e) {
+                                        console.warn('[Preview] 解析 IMDb __NEXT_DATA__ 异常:', e);
+                                    }
+                                }
+                            }
+
+                            // 备用 2.2：从 DOM 选择器解析（严格校验真实标题，绝不使用 imdbId 充数）
+                            if (!parsedData) {
+                                const heroTitle = doc.querySelector('h1[data-testid="hero__pageTitle"]')?.textContent?.trim();
+                                if (heroTitle && heroTitle !== imdbId) {
+                                    const rating = doc.querySelector('div[data-testid="hero-rating-bar__aggregate-rating__score"] span')?.textContent?.trim() || null;
+                                    const poster = doc.querySelector('img.ipc-image')?.getAttribute('src') || '';
+                                    parsedData = {
+                                        source: 'IMDb',
+                                        sourceClass: 'imdb',
+                                        title: heroTitle,
+                                        subTitle: doubanContext.chineseTitle || '',
+                                        poster: poster,
+                                        rating: rating,
+                                        votes: null,
+                                        meta: '',
+                                        description: '',
+                                        isPartial: false
+                                    };
+                                }
+                            }
+
+                            if (parsedData && isValidPreviewData(parsedData)) {
+                                currentBestData = Object.assign({}, currentBestData || {}, parsedData);
+                                currentBestData.isPartial = false;
+                                PREVIEW_CACHE.set(cacheKey, currentBestData);
+                                saveCacheToStorage();
+                                callback(currentBestData);
+                                return;
+                            }
+                        } catch (err) {
+                            console.warn('[Preview] 处理 IMDb 详情页异常:', err);
+                        }
+                    }
+                    checkCompletion();
+                },
+                onerror: function() {
+                    detailDone = true;
+                    checkCompletion();
+                },
+                ontimeout: function() {
+                    detailDone = true;
+                    checkCompletion();
+                }
+            });
+        };
+
+        // 并发触发两个轨道
+        reqSuggestion();
+        reqDetail();
     }
 
     function getImdbPageMediaInfo() {
@@ -361,12 +618,13 @@
         }
 
         const cacheKey = 'douban_' + (imdbId || queryTitle);
-        if (PREVIEW_CACHE.has(cacheKey)) {
-            callback(PREVIEW_CACHE.get(cacheKey));
+        const cached = PREVIEW_CACHE.get(cacheKey);
+        if (cached && isValidPreviewData(cached)) {
+            callback(cached);
             return;
         }
 
-        // 优先方案：直接通过 IMDb ID 请求豆瓣搜索页，提取精准明文数据 window.__DATA__
+        // 优先方案：直接通过 IMDb ID 请求豆瓣搜索页，提取 window.__DATA__
         if (imdbId && /^tt\d+$/i.test(imdbId.trim())) {
             GM_xmlhttpRequest({
                 method: 'GET',
@@ -376,42 +634,49 @@
                     'User-Agent': navigator.userAgent,
                     'Referer': 'https://movie.douban.com/'
                 },
+                timeout: 4500,
                 onload: function(response) {
-                    try {
-                        const html = response.responseText;
-                        const match = html.match(/window\.__DATA__\s*=\s*(\{[\s\S]*?\});/);
-                        if (match) {
-                            const dataJson = JSON.parse(match[1]);
-                            if (dataJson.items && dataJson.items.length > 0) {
-                                const item = dataJson.items[0];
-                                const parsed = splitDoubanTitle(item.title);
+                    if (response.status === 200 && response.responseText) {
+                        try {
+                            const html = response.responseText;
+                            const match = html.match(/window\.__DATA__\s*=\s*(\{[\s\S]*?\});/);
+                            if (match) {
+                                const dataJson = JSON.parse(match[1]);
+                                if (dataJson.items && dataJson.items.length > 0) {
+                                    const item = dataJson.items[0];
+                                    const parsed = splitDoubanTitle(item.title);
 
-                                const data = {
-                                    source: '豆瓣电影',
-                                    sourceClass: 'douban',
-                                    title: parsed.title || imdbId,
-                                    subTitle: parsed.subTitle,
-                                    poster: item.cover_url || '',
-                                    rating: item.rating && item.rating.value ? item.rating.value.toFixed(1) : null,
-                                    votes: item.rating && item.rating.count ? `${Number(item.rating.count).toLocaleString()} 评价` : null,
-                                    meta: item.abstract || '',
-                                    description: item.abstract_2 || ''
-                                };
+                                    const data = {
+                                        source: '豆瓣电影',
+                                        sourceClass: 'douban',
+                                        title: parsed.title || imdbId,
+                                        subTitle: parsed.subTitle,
+                                        poster: item.cover_url || '',
+                                        rating: item.rating && item.rating.value ? item.rating.value.toFixed(1) : null,
+                                        votes: item.rating && item.rating.count ? `${Number(item.rating.count).toLocaleString()} 评价` : null,
+                                        meta: item.abstract || '',
+                                        description: item.abstract_2 || '',
+                                        isPartial: false
+                                    };
 
-                                PREVIEW_CACHE.set(cacheKey, data);
-                                callback(data);
-                                return;
+                                    if (isValidPreviewData(data)) {
+                                        PREVIEW_CACHE.set(cacheKey, data);
+                                        saveCacheToStorage();
+                                        callback(data);
+                                        return;
+                                    }
+                                }
                             }
+                        } catch (e) {
+                            console.warn('[Preview] 解析豆瓣搜索页 __DATA__ 异常:', e);
                         }
-                    } catch (e) {
-                        console.warn('[Preview] 解析豆瓣搜索页 __DATA__ 失败，尝试回退:', e);
                     }
-
-                    // 如果 __DATA__ 解析未果，回退到 suggest 接口
                     fallbackDoubanSuggest(imdbId, queryTitle, queryYear, cacheKey, callback);
                 },
-                onerror: function(err) {
-                    console.warn('[Preview] 请求豆瓣搜索页异常，尝试回退:', err);
+                onerror: function() {
+                    fallbackDoubanSuggest(imdbId, queryTitle, queryYear, cacheKey, callback);
+                },
+                ontimeout: function() {
                     fallbackDoubanSuggest(imdbId, queryTitle, queryYear, cacheKey, callback);
                 }
             });
@@ -441,45 +706,90 @@
                 'Accept': 'application/json, text/javascript, */*; q=0.01',
                 'User-Agent': navigator.userAgent
             },
+            timeout: 4000,
             onload: function(response) {
-                try {
-                    const list = JSON.parse(response.responseText);
-                    if (Array.isArray(list) && list.length > 0) {
-                        let matched = list[0];
-                        if (queryYear) {
-                            const yearMatched = list.find(function(item) {
-                                return item.year && String(item.year).trim() === String(queryYear).trim();
-                            });
-                            if (yearMatched) matched = yearMatched;
+                if (response.status === 200 && response.responseText) {
+                    try {
+                        const list = JSON.parse(response.responseText);
+                        if (Array.isArray(list) && list.length > 0) {
+                            let matched = list[0];
+                            if (queryYear) {
+                                const yearMatched = list.find(function(item) {
+                                    return item.year && String(item.year).trim() === String(queryYear).trim();
+                                });
+                                if (yearMatched) matched = yearMatched;
+                            }
+
+                            const data = {
+                                source: '豆瓣电影',
+                                sourceClass: 'douban',
+                                title: matched.title,
+                                subTitle: matched.sub_title || '',
+                                poster: matched.img || '',
+                                rating: null,
+                                votes: null,
+                                meta: matched.year ? `${matched.year} 年` : '',
+                                description: '',
+                                isPartial: true
+                            };
+
+                            if (isValidPreviewData(data)) {
+                                PREVIEW_CACHE.set(cacheKey, data);
+                                saveCacheToStorage();
+                                callback(data);
+                                return;
+                            }
                         }
-
-                        const data = {
-                            source: '豆瓣电影',
-                            sourceClass: 'douban',
-                            title: matched.title,
-                            subTitle: matched.sub_title || '',
-                            poster: matched.img || '',
-                            rating: null,
-                            votes: null,
-                            meta: matched.year ? `${matched.year} 年` : '',
-                            description: ''
-                        };
-
-                        PREVIEW_CACHE.set(cacheKey, data);
-                        callback(data);
-                    } else {
-                        callback(null);
+                    } catch (err) {
+                        console.warn('[Preview] 豆瓣备用解析异常:', err);
                     }
-                } catch (err) {
-                    console.error('[Preview] 豆瓣备用查询失败:', err);
-                    callback(null);
                 }
+                callback(null);
             },
-            onerror: function(err) {
-                console.error('[Preview] 豆瓣备用请求异常:', err);
+            onerror: function() {
+                callback(null);
+            },
+            ontimeout: function() {
                 callback(null);
             }
         });
+    }
+
+    // 智能闲时预取：在页面空闲时提前把预览数据拉取到本地缓存，鼠标悬停时 0ms 秒开
+    function preloadPreview(type, info) {
+        if (!info) return;
+        const cacheKey = (type === 'imdb') 
+            ? ('imdb_' + (typeof info === 'object' ? info.imdbId : info))
+            : ('douban_' + (typeof info === 'object' ? (info.imdbId || info.title) : info));
+        
+        const cached = PREVIEW_CACHE.get(cacheKey);
+        if (cached && !cached.isPartial) return;
+
+        const runPreload = function() {
+            if (type === 'imdb') {
+                const id = typeof info === 'object' ? info.imdbId : info;
+                fetchImdbPreview(id, function(data) {
+                    if (data && data.poster) {
+                        // 预热海报图片对象
+                        const img = new Image();
+                        img.src = data.poster;
+                    }
+                });
+            } else if (type === 'douban') {
+                fetchDoubanPreview(info, function(data) {
+                    if (data && data.poster) {
+                        const img = new Image();
+                        img.src = data.poster;
+                    }
+                });
+            }
+        };
+
+        if (typeof window.requestIdleCallback === 'function') {
+            window.requestIdleCallback(runPreload, { timeout: 3000 });
+        } else {
+            setTimeout(runPreload, 1200);
+        }
     }
 
     function bindHoverPreview(element, type, getInfoFn) {
@@ -495,33 +805,61 @@
             const info = typeof getInfoFn === 'function' ? getInfoFn($el) : $el.data('imdbId');
             if (!info) return;
 
+            const cacheKey = (type === 'imdb') 
+                ? ('imdb_' + (typeof info === 'object' ? info.imdbId : info))
+                : ('douban_' + (typeof info === 'object' ? (info.imdbId || info.title) : info));
+
+            const cached = PREVIEW_CACHE.get(cacheKey);
+            const hasCompleteCache = cached && !cached.isPartial && isValidPreviewData(cached);
+
+            // 命中完整缓存时使用 60ms 超短防抖瞬间秒开；无缓存使用 150ms 避免用户快速扫过产生不必要开销
+            const delay = hasCompleteCache ? 60 : 150;
+
             hoverShowTimer = setTimeout(function() {
+                const reqId = ++currentPreviewRequestId;
                 const card = getOrCreatePreviewCard();
                 const $card = $(card);
-                $card.find('.mpc-loading').show();
-                $card.find('.mpc-content').hide();
-                $card.find('.mpc-error').hide();
 
                 positionPreviewCard($el[0]);
+
+                if (hasCompleteCache) {
+                    renderPreviewCard(cached);
+                    positionPreviewCard($el[0]);
+                    card.classList.add('mpc-visible');
+                    return;
+                }
+
+                // 若有 partial 缓存先展示已有内容，否则展示加载动画
+                if (cached && isValidPreviewData(cached)) {
+                    renderPreviewCard(cached);
+                } else {
+                    $card.find('.mpc-loading').show();
+                    $card.find('.mpc-content').hide();
+                    $card.find('.mpc-error').hide();
+                }
                 card.classList.add('mpc-visible');
+
+                const handleData = function(data) {
+                    // 竞态保护：用户若已将鼠标移动至其他链接，或卡片已关闭，则放弃更新
+                    if (reqId !== currentPreviewRequestId) return;
+                    if (!card.classList.contains('mpc-visible')) return;
+                    if (data) {
+                        renderPreviewCard(data);
+                        positionPreviewCard($el[0]);
+                    } else if (!cached) {
+                        $card.find('.mpc-loading').hide();
+                        $card.find('.mpc-content').hide();
+                        $card.find('.mpc-error').show();
+                    }
+                };
 
                 if (type === 'imdb') {
                     const id = typeof info === 'object' ? info.imdbId : info;
-                    fetchImdbPreview(id, function(data) {
-                        if (card.classList.contains('mpc-visible')) {
-                            renderPreviewCard(data);
-                            positionPreviewCard($el[0]);
-                        }
-                    });
+                    fetchImdbPreview(id, handleData);
                 } else if (type === 'douban') {
-                    fetchDoubanPreview(info, function(data) {
-                        if (card.classList.contains('mpc-visible')) {
-                            renderPreviewCard(data);
-                            positionPreviewCard($el[0]);
-                        }
-                    });
+                    fetchDoubanPreview(info, handleData);
                 }
-            }, 250);
+            }, delay);
         });
 
         $el.on('mouseleave', function() {
@@ -706,6 +1044,565 @@ function showConfirmDialog(title, message, onConfirm, onCancel) {
     });
 }
 
+// 智能提取列表项中用户的实际豆瓣评分（有评分为 1~5 星，未评分为 null）
+function extractMovieRatingFromItem($item) {
+    if (!$item || !$item.length) return null;
+
+    // 1. 查找评分 span (如 rating1-t 到 rating5-t)
+    const $ratingSpan = $item.find('span[class*="rating"]');
+    for (let i = 0; i < $ratingSpan.length; i++) {
+        const cls = $ratingSpan.eq(i).attr('class') || '';
+        const m = cls.match(/rating([1-5])-t/);
+        if (m) return parseInt(m[1]);
+    }
+
+    // 2. 查找 allstar10 到 allstar50，或 stars1 到 stars5
+    const $allstarSpan = $item.find('span[class*="allstar"], span[class*="stars"]');
+    for (let i = 0; i < $allstarSpan.length; i++) {
+        const cls = $allstarSpan.eq(i).attr('class') || '';
+        let m = cls.match(/allstar([1-5])0/);
+        if (m) return parseInt(m[1]);
+        m = cls.match(/stars([1-5])\b/);
+        if (m) return parseInt(m[1]);
+    }
+
+    // 3. 查找 title 属性（“力荐/推荐/还行/较差/很差”）
+    const $titled = $item.find('[title*="力荐"], [title*="推荐"], [title*="还行"], [title*="较差"], [title*="很差"]');
+    for (let i = 0; i < $titled.length; i++) {
+        const t = $titled.eq(i).attr('title') || '';
+        if (t.includes('力荐')) return 5;
+        if (t.includes('推荐')) return 4;
+        if (t.includes('还行')) return 3;
+        if (t.includes('较差')) return 2;
+        if (t.includes('很差')) return 1;
+    }
+
+    return null;
+}
+
+// 智能提取详情页中用户的实际豆瓣评分（有评分为 1~5 星，未评分为 null）
+function extractSubjectUserRating() {
+    // 策略 1：在 #interest_sect_level 操作区内检索
+    const $sect = $('#interest_sect_level');
+    if ($sect.length) {
+        // 1.1 精准查找 span/div 中的 allstar 类（如 allstar50 ~ allstar10）
+        const $allstars = $sect.find('[class*="allstar"]');
+        for (let i = 0; i < $allstars.length; i++) {
+            const cls = $allstars.eq(i).attr('class') || '';
+            const m = cls.match(/allstar([1-5])0/);
+            if (m) {
+                const r = parseInt(m[1]);
+                console.log('[Douban to IMDb] 成功从 #interest_sect_level allstar 识别用户评分:', r);
+                return r;
+            }
+        }
+
+        // 1.2 检查已打分星星的 starstop / a_stars / n_rating / rating_stars 类
+        const $stars = $sect.find('.starstop, .j.a_stars span, #n_rating, .rating_stars, span[class*="stars"]');
+        for (let i = 0; i < $stars.length; i++) {
+            const cls = $stars.eq(i).attr('class') || '';
+            let m = cls.match(/allstar([1-5])0/) || cls.match(/stars([1-5])\b/) || cls.match(/rating([1-5])\b/);
+            if (m) {
+                const r = parseInt(m[1]);
+                console.log('[Douban to IMDb] 成功从星星类名识别用户评分:', r);
+                return r;
+            }
+        }
+
+        // 1.3 检查 title 属性（“力荐/推荐/还行/较差/很差”）
+        const $titled = $sect.find('[title*="力荐"], [title*="推荐"], [title*="还行"], [title*="较差"], [title*="很差"]');
+        if ($titled.length) {
+            for (let i = 0; i < $titled.length; i++) {
+                const t = $titled.eq(i).attr('title') || '';
+                if (t.includes('力荐')) return 5;
+                if (t.includes('推荐')) return 4;
+                if (t.includes('还行')) return 3;
+                if (t.includes('较差')) return 2;
+                if (t.includes('很差')) return 1;
+            }
+        }
+
+        // 1.4 检查操作区完整文本（同时兼容全角冒号、半角冒号与空格）
+        const text = $sect.text() || '';
+        if (text.includes('力荐')) return 5;
+        if (text.includes('推荐')) return 4;
+        if (text.includes('还行')) return 3;
+        if (text.includes('较差')) return 2;
+        if (text.includes('很差')) return 1;
+    }
+
+    // 策略 2：全页面排除全网平均分框 (#interest_sectl)，在整个页面文章主体中查找用户的实际打分痕迹
+    const $article = $('#content .article, #content');
+    if ($article.length) {
+        // 查找包含 allstar 的元素，排除 #interest_sectl 下的全网平均分
+        const $outsideStars = $article.find('[class*="allstar"]').not('#interest_sectl *');
+        for (let i = 0; i < $outsideStars.length; i++) {
+            const cls = $outsideStars.eq(i).attr('class') || '';
+            const m = cls.match(/allstar([1-5])0/);
+            if (m) {
+                const r = parseInt(m[1]);
+                console.log('[Douban to IMDb] 成功从页面主体识别用户评分:', r);
+                return r;
+            }
+        }
+
+        // 查找包含“你的评价/我的评价”文本的容器
+        const $evalTextEls = $article.find('*').filter(function() {
+            const t = $(this).text();
+            return (t.includes('你的评价') || t.includes('我的评价')) && $(this).children().length <= 2;
+        });
+        for (let i = 0; i < $evalTextEls.length; i++) {
+            const t = $evalTextEls.eq(i).text() || '';
+            if (t.includes('力荐')) return 5;
+            if (t.includes('推荐')) return 4;
+            if (t.includes('还行')) return 3;
+            if (t.includes('较差')) return 2;
+            if (t.includes('很差')) return 1;
+        }
+    }
+
+    console.log('[Douban to IMDb] 未检测到详情页当前用户豆瓣评分');
+    return null;
+}
+
+// 显示本页批量同步选择对话框（包含电影多选列表、全选选择器、同步目标选择）
+function showBatchSyncPageDialog(movieList, onConfirm) {
+    if (!movieList || movieList.length === 0) return;
+
+    // 默认目标：根据当前页面判断，若在想看(wish)页面默认选中 watchlist，否则默认 rating
+    const isWishPage = location.pathname.includes('/wish') || location.search.includes('status=wish');
+    let currentTarget = isWishPage ? CONFIG.SYNC_TARGET.WATCHLIST : CONFIG.SYNC_TARGET.RATING;
+
+    const totalCount = movieList.length;
+    const selectedSet = new Set(movieList.map(m => m.id)); // 默认全选
+
+    let itemsHtml = '';
+    movieList.forEach((movie, index) => {
+        let metaHtml = '';
+        if (movie.hasRating) {
+            const ratingStars = '★'.repeat(movie.rating) + '☆'.repeat(5 - movie.rating);
+            metaHtml = `<span class="sync-movie-star">${ratingStars}</span> <span class="sync-movie-score">${movie.rating}星 (${movie.rating * 2}分)</span>`;
+        } else {
+            metaHtml = `<span class="sync-movie-unrated">未评分</span>`;
+        }
+
+        const posterHtml = movie.poster 
+            ? `<img class="sync-movie-thumb" src="${movie.poster}" alt="poster">`
+            : `<div class="sync-movie-thumb placeholder">🎬</div>`;
+
+        itemsHtml += `
+            <div class="sync-movie-item selected" data-id="${movie.id}" data-index="${index}">
+                <div class="sync-movie-cb-wrap">
+                    <input type="checkbox" class="sync-movie-cb" id="sync-cb-${movie.id}" checked>
+                </div>
+                <span class="sync-movie-num">${index + 1}</span>
+                ${posterHtml}
+                <div class="sync-movie-details">
+                    <div class="sync-movie-title" title="${movie.title}">${movie.title}</div>
+                    <div class="sync-movie-meta">
+                        ${metaHtml}
+                    </div>
+                </div>
+            </div>
+        `;
+    });
+
+    const dialog = $(`
+        <div class="sync-target-dialog-overlay">
+            <div class="sync-target-dialog sync-batch-page-dialog">
+                <div class="sync-batch-head">
+                    <div class="sync-batch-title-row">
+                        <h3>选择同步电影与目标</h3>
+                        <button class="sync-dialog-close" title="关闭">×</button>
+                    </div>
+                    <p class="sync-batch-desc">已检测到本页 ${totalCount} 部待同步电影，请选择目标并按需勾选：</p>
+                </div>
+
+                <!-- 目标选择 Tabs -->
+                <div class="sync-target-tabs">
+                    <div class="sync-target-tab ${currentTarget === CONFIG.SYNC_TARGET.RATING ? 'active' : ''}" data-target="rating">
+                        <span class="tab-icon">⭐</span>
+                        <div class="tab-info">
+                            <span class="tab-title">已看（评分）</span>
+                            <span class="tab-desc">同步评分到 IMDb History</span>
+                        </div>
+                    </div>
+                    <div class="sync-target-tab ${currentTarget === CONFIG.SYNC_TARGET.WATCHLIST ? 'active' : ''}" data-target="watchlist">
+                        <span class="tab-icon">📋</span>
+                        <div class="tab-info">
+                            <span class="tab-title">想看（Watchlist）</span>
+                            <span class="tab-desc">添加到 IMDb Watchlist</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 列表工具栏 -->
+                <div class="sync-list-toolbar">
+                    <div class="sync-toolbar-left">
+                        <label class="sync-select-all-label">
+                            <input type="checkbox" id="sync-select-all-cb" checked>
+                            <span class="sync-select-all-text">全选</span>
+                        </label>
+                        <button type="button" class="sync-action-link" id="sync-invert-btn">反选</button>
+                    </div>
+                    <div class="sync-toolbar-right">
+                        已选 <strong id="sync-selected-count">${totalCount}</strong> / ${totalCount} 部
+                    </div>
+                </div>
+
+                <!-- 电影多选滚动列表 -->
+                <div class="sync-movies-scroll-list">
+                    ${itemsHtml}
+                </div>
+
+                <!-- 底部操作按钮 -->
+                <div class="sync-batch-foot">
+                    <button class="sync-btn-cancel">取消</button>
+                    <button class="sync-btn-submit">开始同步 (${totalCount}部)</button>
+                </div>
+            </div>
+        </div>
+    `);
+
+    $('body').append(dialog);
+
+    setTimeout(() => {
+        dialog.addClass('show');
+    }, 10);
+
+    const updateSelectionState = function() {
+        const count = selectedSet.size;
+        dialog.find('#sync-selected-count').text(count);
+
+        const $submitBtn = dialog.find('.sync-btn-submit');
+        if (count > 0) {
+            $submitBtn.prop('disabled', false).removeClass('disabled').text(`开始同步 (${count}部)`);
+        } else {
+            $submitBtn.prop('disabled', true).addClass('disabled').text('请至少选择一部电影');
+        }
+
+        const $allCb = dialog.find('#sync-select-all-cb');
+        if (count === totalCount) {
+            $allCb.prop('checked', true).prop('indeterminate', false);
+        } else if (count === 0) {
+            $allCb.prop('checked', false).prop('indeterminate', false);
+        } else {
+            $allCb.prop('checked', false).prop('indeterminate', true);
+        }
+    };
+
+    // 目标切换
+    dialog.find('.sync-target-tab').on('click', function() {
+        dialog.find('.sync-target-tab').removeClass('active');
+        $(this).addClass('active');
+        currentTarget = $(this).attr('data-target');
+    });
+
+    // 单项点击整行切换
+    dialog.find('.sync-movie-item').on('click', function(e) {
+        if ($(e.target).is('input[type="checkbox"]')) {
+            return;
+        }
+        const $item = $(this);
+        const $cb = $item.find('.sync-movie-cb');
+        const newState = !$cb.prop('checked');
+        $cb.prop('checked', newState);
+        const id = parseInt($item.attr('data-id'));
+        if (newState) {
+            selectedSet.add(id);
+            $item.addClass('selected');
+        } else {
+            selectedSet.delete(id);
+            $item.removeClass('selected');
+        }
+        updateSelectionState();
+    });
+
+    // 单独点击 checkbox
+    dialog.find('.sync-movie-cb').on('change', function() {
+        const $cb = $(this);
+        const $item = $cb.closest('.sync-movie-item');
+        const id = parseInt($item.attr('data-id'));
+        if ($cb.prop('checked')) {
+            selectedSet.add(id);
+            $item.addClass('selected');
+        } else {
+            selectedSet.delete(id);
+            $item.removeClass('selected');
+        }
+        updateSelectionState();
+    });
+
+    // 全选切换
+    dialog.find('#sync-select-all-cb').on('change', function() {
+        const checked = $(this).prop('checked');
+        dialog.find('.sync-movie-cb').prop('checked', checked);
+        if (checked) {
+            movieList.forEach(m => selectedSet.add(m.id));
+            dialog.find('.sync-movie-item').addClass('selected');
+        } else {
+            selectedSet.clear();
+            dialog.find('.sync-movie-item').removeClass('selected');
+        }
+        updateSelectionState();
+    });
+
+    // 反选按钮
+    dialog.find('#sync-invert-btn').on('click', function(e) {
+        e.preventDefault();
+        dialog.find('.sync-movie-item').each(function() {
+            const $item = $(this);
+            const id = parseInt($item.attr('data-id'));
+            const $cb = $item.find('.sync-movie-cb');
+            const newState = !$cb.prop('checked');
+            $cb.prop('checked', newState);
+            if (newState) {
+                selectedSet.add(id);
+                $item.addClass('selected');
+            } else {
+                selectedSet.delete(id);
+                $item.removeClass('selected');
+            }
+        });
+        updateSelectionState();
+    });
+
+    const closeDialog = function(callback) {
+        dialog.removeClass('show');
+        setTimeout(() => {
+            dialog.remove();
+            if (callback) callback();
+        }, 300);
+    };
+
+    dialog.find('.sync-btn-cancel, .sync-dialog-close').on('click', function() {
+        closeDialog();
+    });
+
+    dialog.find('.sync-btn-submit').on('click', function() {
+        if (selectedSet.size === 0) return;
+        const selectedMovies = movieList.filter(m => selectedSet.has(m.id));
+        closeDialog(() => {
+            if (onConfirm) onConfirm(selectedMovies, currentTarget);
+        });
+    });
+}
+
+// 电影详情页单片同步对话框
+function showSubjectMovieSyncDialog(movieInfo, onConfirm) {
+    // 自动识别的评分：1~5 或 null
+    const autoDetectedRating = (movieInfo.userRating && movieInfo.userRating >= 1 && movieInfo.userRating <= 5) 
+        ? movieInfo.userRating 
+        : null;
+
+    // 当前选中的评分：未打分时默认 null，绝不默认满分！
+    let selectedRating = autoDetectedRating;
+
+    // 默认目标：若自动识别到评分，默认 rating；若标记了想看且无评分，默认 watchlist；否则默认 rating
+    let currentTarget = autoDetectedRating 
+        ? CONFIG.SYNC_TARGET.RATING 
+        : (movieInfo.isWish ? CONFIG.SYNC_TARGET.WATCHLIST : CONFIG.SYNC_TARGET.RATING);
+
+    const posterHtml = movieInfo.poster 
+        ? `<img class="subject-sync-thumb" src="${movieInfo.poster}" alt="poster">`
+        : `<div class="subject-sync-thumb placeholder">🎬</div>`;
+
+    const getScoreHintHtml = (rating) => {
+        if (rating) {
+            return `${rating} 星 (${rating * 2} 分)` + (rating === autoDetectedRating ? ' <span class="sync-auto-badge">已自动识别</span>' : '');
+        }
+        return '<span class="subject-unselected-hint">未评分（请点击下方选择分值）</span>';
+    };
+
+    const dialog = $(`
+        <div class="sync-target-dialog-overlay">
+            <div class="sync-target-dialog subject-single-sync-dialog">
+                <div class="sync-batch-head">
+                    <div class="sync-batch-title-row">
+                        <h3>同步此电影到 IMDb</h3>
+                        <button class="sync-dialog-close" title="关闭">×</button>
+                    </div>
+                    <p class="sync-batch-desc">将当前豆瓣电影自动同步至 IMDb 评分记录或想看列表：</p>
+                </div>
+
+                <!-- 电影卡片预览 -->
+                <div class="subject-sync-media-card">
+                    ${posterHtml}
+                    <div class="subject-sync-media-info">
+                        <div class="subject-sync-media-title" title="${movieInfo.title}">${movieInfo.title}</div>
+                        <div class="subject-sync-media-meta">
+                            <span>IMDb ID: <strong>${movieInfo.imdbId}</strong></span>
+                            ${movieInfo.year ? ` • <span>${movieInfo.year}年</span>` : ''}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 目标选择 Tabs -->
+                <div class="sync-target-tabs">
+                    <div class="sync-target-tab ${currentTarget === CONFIG.SYNC_TARGET.RATING ? 'active' : ''}" data-target="rating">
+                        <span class="tab-icon">⭐</span>
+                        <div class="tab-info">
+                            <span class="tab-title">已看（评分）</span>
+                            <span class="tab-desc">同步评分到 IMDb 评分记录</span>
+                        </div>
+                    </div>
+                    <div class="sync-target-tab ${currentTarget === CONFIG.SYNC_TARGET.WATCHLIST ? 'active' : ''}" data-target="watchlist">
+                        <span class="tab-icon">📋</span>
+                        <div class="tab-info">
+                            <span class="tab-title">想看（Watchlist）</span>
+                            <span class="tab-desc">添加到 IMDb 待看列表</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 评分选择器（仅当目标为 rating 时可见） -->
+                <div class="subject-sync-rating-selector" style="${currentTarget === CONFIG.SYNC_TARGET.RATING ? '' : 'display:none;'}">
+                    <div class="subject-sync-rating-label">
+                        <span>同步评分分值</span>
+                        <span class="subject-sync-rating-text">${getScoreHintHtml(selectedRating)}</span>
+                    </div>
+                    <div class="subject-rating-stars-bar">
+                        ${[1, 2, 3, 4, 5].map(r => `
+                            <button type="button" class="subject-star-opt ${r === selectedRating ? 'active' : ''}" data-star="${r}">
+                                ${'★'.repeat(r)}<br>${r * 2}分
+                            </button>
+                        `).join('')}
+                    </div>
+                </div>
+
+                <!-- 底部操作按钮 -->
+                <div class="sync-batch-foot">
+                    <button class="sync-btn-cancel">取消</button>
+                    <button class="sync-btn-submit">立即同步到 IMDb</button>
+                </div>
+            </div>
+        </div>
+    `);
+
+    $('body').append(dialog);
+
+    setTimeout(() => {
+        dialog.addClass('show');
+    }, 10);
+
+    // 目标切换
+    dialog.find('.sync-target-tab').on('click', function() {
+        dialog.find('.sync-target-tab').removeClass('active');
+        $(this).addClass('active');
+        currentTarget = $(this).attr('data-target');
+        if (currentTarget === CONFIG.SYNC_TARGET.RATING) {
+            dialog.find('.subject-sync-rating-selector').slideDown(200);
+        } else {
+            dialog.find('.subject-sync-rating-selector').slideUp(200);
+        }
+    });
+
+    // 评分星级手动选择
+    dialog.find('.subject-star-opt').on('click', function() {
+        dialog.find('.subject-star-opt').removeClass('active');
+        $(this).addClass('active');
+        selectedRating = parseInt($(this).attr('data-star'));
+        dialog.find('.subject-sync-rating-text').html(getScoreHintHtml(selectedRating));
+    });
+
+    const closeDialog = function(callback) {
+        dialog.removeClass('show');
+        setTimeout(() => {
+            dialog.remove();
+            if (callback) callback();
+        }, 300);
+    };
+
+    dialog.find('.sync-btn-cancel, .sync-dialog-close').on('click', function() {
+        closeDialog();
+    });
+
+    dialog.find('.sync-btn-submit').on('click', function() {
+        // 如果用户选择了“已看评分”，必须选择分值
+        if (currentTarget === CONFIG.SYNC_TARGET.RATING) {
+            if (!selectedRating) {
+                showToast('请在下方点击选择需要同步的评分分值（1~5星）', 'error');
+                return;
+            }
+        }
+        closeDialog(() => {
+            if (onConfirm) onConfirm(currentTarget, selectedRating);
+        });
+    });
+}
+
+// 触发当前电影详情页同步
+function triggerSubjectMovieSync() {
+    let imdbId = '';
+    // 从页面 #info 区域查找有效 IMDb ID
+    $('#info a').each(function() {
+        const href = $(this).attr('href') || '';
+        const text = $(this).text().trim();
+        if (href.includes('imdb.com/title/')) {
+            const m = href.match(/tt\d+/);
+            if (m) { imdbId = m[0]; return false; }
+        } else if (text.match(/^tt\d+$/)) {
+            imdbId = text;
+            return false;
+        }
+    });
+
+    if (!imdbId) {
+        showToast('未在当前电影页面找到有效的 IMDb 编号', 'error');
+        return;
+    }
+
+    const doubanId = location.pathname.split('/')[2];
+    const movieTitle = $('span[property="v:itemreviewed"]').text().trim() || $('h1').text().replace('(豆瓣)', '').trim();
+    const yearText = $('.year').text().replace(/[\(\)]/g, '').trim();
+    const poster = $('#mainpic img').attr('src') || '';
+
+    // 智能提取用户在豆瓣的实际评分（未评分为 null）
+    const userRating = extractSubjectUserRating();
+    const isWish = $('#interest_sect_level').text().includes('已想看');
+
+    showSubjectMovieSyncDialog({
+        title: movieTitle,
+        year: yearText,
+        poster: poster,
+        imdbId: imdbId,
+        doubanId: doubanId,
+        userRating: userRating,
+        isWish: isWish
+    }, function(target, rating) {
+        const score = (rating || 5) * 2;
+        const batchId = 'batch-' + Date.now();
+        const targetText = target === CONFIG.SYNC_TARGET.RATING ? `已看(评分: ${score}分)` : '想看(Watchlist)';
+        
+        showToast(`正在将《${movieTitle}》同步到 IMDb ${targetText}...`, 'success');
+
+        const imdbUrl = `https://www.imdb.com/title/${imdbId}/#${score}-${target}-${batchId}-0-${doubanId}`;
+        window.open(imdbUrl, '_blank');
+    });
+}
+
+// 在电影详情页注入同步按钮（只在海报下方的想看/看过操作区保留唯一的同步按钮，完美融入豆瓣排版）
+function addSubjectPageSyncButtons() {
+    if (!location.pathname.includes('/subject/')) return;
+
+    const $sect = $('#interest_sect_level');
+    if ($sect.length && !$sect.find('.subject-action-sync-btn').length) {
+        const $btnWrap = $(`
+            <div class="subject-sync-action-wrap">
+                <button type="button" class="subject-action-sync-btn" title="将此电影评分或想看同步到 IMDb">
+                    <span class="subject-sync-imdb-badge">IMDb</span>
+                    <span class="subject-sync-btn-label">⚡ 同步到 IMDb</span>
+                </button>
+            </div>
+        `);
+        $sect.append($btnWrap);
+        $btnWrap.find('.subject-action-sync-btn').on('click', function(e) {
+            e.preventDefault();
+            triggerSubjectMovieSync();
+        });
+    }
+}
+
 // 同步进度管理器
 const SyncProgressManager = {
     panel: null,
@@ -886,49 +1783,51 @@ const SyncProgressManager = {
 
 // 批量同步本页函数
 function batchSyncCurrentPage() {
-    const $syncButtons = $('.sync-imdb-btn').not('.syncing, .synced');
+    const $syncButtons = $('.sync-imdb-btn').not('.syncing, .synced, .subject-sync-btn, .subject-info-sync-btn');
     const total = $syncButtons.length;
     
     if (total === 0) {
         showToast('本页没有需要同步的电影', 'error');
         return;
     }
-    
-    // 显示同步目标选择对话框（不需要二次确认）
-    showSyncTargetDialog(function(target) {
-        if (!target) return; // 用户取消
+
+    // 收集本页全部电影信息
+    const movieList = [];
+    $syncButtons.each(function(idx) {
+        const $btn = $(this);
+        const $item = $btn.closest('.item');
+        const movieTitle = $btn.parent().find('a em').text() || $btn.parent().find('a').text() || $item.find('.title a').text() || '未知电影';
+        const movieUrl = $btn.parent().find('a').attr('href') || $item.find('.title a').attr('href') || '';
+        const posterUrl = $item.find('.pic img').attr('src') || $item.find('.nbg img').attr('src') || '';
         
-        const targetText = target === CONFIG.SYNC_TARGET.RATING ? '已看(评分)' : '想看(Watchlist)';
+        // 智能获取该条目的真实评分（无评分则为 null，不默认满分）
+        const realRating = extractMovieRatingFromItem($item);
         
-        // 收集电影信息
-        const movieList = [];
-        $syncButtons.each(function() {
-            const $btn = $(this);
-            const movieTitle = $btn.parent().find('a em').text() || $btn.parent().find('a').text();
-            const movieUrl = $btn.parent().find('a').attr('href');
-            const $ratingSpan = $btn.closest('.item').find('span[class*="rating"]');
-            let rating = 5;
-            if ($ratingSpan.length) {
-                const ratingClass = $ratingSpan.attr('class');
-                const match = ratingClass.match(/rating(\d)-t/);
-                if (match) {
-                    rating = parseInt(match[1]);
-                }
-            }
-            
-            movieList.push({
-                title: movieTitle,
-                url: movieUrl,
-                rating: rating,
-                button: $btn,
-                target: target  // 添加 target 属性
-            });
+        movieList.push({
+            id: idx,
+            title: movieTitle.trim(),
+            url: movieUrl,
+            rating: realRating,
+            hasRating: realRating !== null,
+            poster: posterUrl,
+            button: $btn
         });
+    });
+
+    // 弹出本页电影列表多选与目标设置对话框
+    showBatchSyncPageDialog(movieList, function(selectedMovies, target) {
+        if (!selectedMovies || selectedMovies.length === 0) return;
+
+        const targetText = target === CONFIG.SYNC_TARGET.RATING ? '已看(评分)' : '想看(Watchlist)';
+        const count = selectedMovies.length;
+        
+        // 为选中的电影补充 target
+        selectedMovies.forEach(m => m.target = target);
         
         // 初始化进度面板
-        SyncProgressManager.init(movieList, target);
+        SyncProgressManager.init(selectedMovies, target);
         
-        showToast(`开始同步本页 ${total} 部电影到${targetText}...`, 'success');
+        showToast(`开始同步本页选中的 ${count} 部电影到${targetText}...`, 'success');
         
         // 生成批次ID
         const batchId = 'batch-' + Date.now();
@@ -939,7 +1838,7 @@ function batchSyncCurrentPage() {
         sessionStorage.setItem('main-sync-batch-id', batchId);
         
         // 初始化测试同步状态
-        if (CONFIG.TEST_SYNC_ENABLED && total > CONFIG.TEST_SYNC_COUNT) {
+        if (CONFIG.TEST_SYNC_ENABLED && count > CONFIG.TEST_SYNC_COUNT) {
             testSyncStatus = {
                 isTestPhase: true,
                 testCount: CONFIG.TEST_SYNC_COUNT,
@@ -958,12 +1857,12 @@ function batchSyncCurrentPage() {
             };
         }
         
-        // 开始同步（测试阶段或全部）
-        const syncCount = testSyncStatus.isTestPhase ? CONFIG.TEST_SYNC_COUNT : movieList.length;
+        // 开始同步（测试阶段或全部选中的电影）
+        const syncCount = testSyncStatus.isTestPhase ? CONFIG.TEST_SYNC_COUNT : selectedMovies.length;
         const openedTabs = []; // 存储打开的标签页引用
         
         for (let index = 0; index < syncCount; index++) {
-            const movie = movieList[index];
+            const movie = selectedMovies[index];
             
             setTimeout(() => {
                 // 检查是否暂停
@@ -978,7 +1877,8 @@ function batchSyncCurrentPage() {
                 console.log('[Douban to IMDb] 批量同步:', movie.title, '目标:', target, 'BatchID:', batchId, 'Index:', index);
                 
                 // 打开详情页
-                const syncUrl = movie.url + '#sync-' + movie.rating + '-' + target + '-' + batchId + '-' + index;
+                const syncRating = (movie.hasRating && movie.rating) ? movie.rating : 5;
+                const syncUrl = movie.url + '#sync-' + syncRating + '-' + target + '-' + batchId + '-' + index;
                 console.log('[Douban to IMDb] 打开详情页:', syncUrl);
                 
                 const newTab = window.open(syncUrl, '_blank');
@@ -1009,8 +1909,6 @@ function batchSyncCurrentPage() {
         // 定期检查标签页状态
         const checkInterval = setInterval(() => {
             openedTabs.forEach((item, i) => {
-                // 不再读取 window.name，改为检查 localStorage
-                
                 if (item.tab && item.tab.closed) {
                     const movie = item.movie;
                     const index = item.index;
@@ -1019,15 +1917,6 @@ function batchSyncCurrentPage() {
                     // 从 localStorage 读取结果
                     const resultKey = 'douban-sync-result-' + batchId + '-' + index;
                     const resultData = localStorage.getItem(resultKey);
-                    
-                    // 调试：打印所有相关的 localStorage 键
-                    console.log('[Douban to IMDb] 检查 localStorage，key:', resultKey);
-                    console.log('[Douban to IMDb] localStorage 中所有键:', Object.keys(localStorage));
-                    const allSyncKeys = Object.keys(localStorage).filter(k => k.startsWith('douban-sync-result-'));
-                    console.log('[Douban to IMDb] 所有同步结果键:', allSyncKeys);
-                    allSyncKeys.forEach(k => {
-                        console.log('[Douban to IMDb] -', k, '=', localStorage.getItem(k));
-                    });
                     
                     console.log('[Douban to IMDb] 标签页已关闭:', movie.title, '耗时:', elapsed + 'ms', 'data:', resultData);
                     
@@ -1067,8 +1956,6 @@ function batchSyncCurrentPage() {
                     
                     console.log('[Douban to IMDb] 判断结果:', isSuccess ? '成功' : '失败', '原因:', failReason);
                     
-                    console.log('[Douban to IMDb] 判断结果:', isSuccess ? '成功' : '失败', '原因:', failReason);
-                    
                     // 根据实际结果更新状态
                     if (isSuccess) {
                         movie.button.removeClass('syncing').addClass('synced').text('已同步✓');
@@ -1078,7 +1965,7 @@ function batchSyncCurrentPage() {
                         if (testSyncStatus.isTestPhase) {
                             testSyncStatus.successCount++;
                             console.log('[Douban to IMDb] 测试同步成功:', testSyncStatus.successCount, '/', testSyncStatus.testCount);
-                            checkTestPhaseComplete(movieList, batchId);
+                            checkTestPhaseComplete(selectedMovies, batchId);
                         }
                     } else {
                         movie.button.removeClass('syncing').addClass('sync-failed').text('失败✗');
@@ -1089,7 +1976,7 @@ function batchSyncCurrentPage() {
                         if (testSyncStatus.isTestPhase) {
                             testSyncStatus.failedCount++;
                             console.log('[Douban to IMDb] 测试同步失败:', testSyncStatus.failedCount, '/', testSyncStatus.testCount);
-                            checkTestPhaseComplete(movieList, batchId);
+                            checkTestPhaseComplete(selectedMovies, batchId);
                         }
                     }
                     
@@ -1600,31 +2487,42 @@ GM_addStyle(`
     
     /* 同步目标选择对话框样式 */
     .sync-target-dialog-overlay {
-        position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: rgba(0, 0, 0, 0.6);
-        z-index: 100002;
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        position: fixed !important;
+        top: 0 !important;
+        left: 0 !important;
+        right: 0 !important;
+        bottom: 0 !important;
+        width: 100vw !important;
+        height: 100vh !important;
+        width: 100% !important;
+        height: 100% !important;
+        background: rgba(0, 0, 0, 0.6) !important;
+        z-index: 99999999 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
         opacity: 0;
-        transition: opacity 0.3s ease;
+        transition: opacity 0.25s ease;
+        box-sizing: border-box !important;
+        margin: 0 !important;
+        padding: 20px !important;
+        overflow-y: auto !important;
     }
     .sync-target-dialog-overlay.show {
         opacity: 1;
     }
     .sync-target-dialog {
-        background: white;
-        border-radius: 12px;
-        padding: 30px;
+        background: white !important;
+        border-radius: 12px !important;
+        padding: 30px !important;
         max-width: 500px;
         width: 90%;
-        box-shadow: 0 10px 40px rgba(0,0,0,0.3);
-        transform: scale(0.9);
-        transition: transform 0.3s ease;
+        box-shadow: 0 16px 48px rgba(0,0,0,0.3) !important;
+        transform: scale(0.92);
+        transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1) !important;
+        margin: auto !important;
+        box-sizing: border-box !important;
+        position: relative !important;
     }
     .sync-target-dialog-overlay.show .sync-target-dialog {
         transform: scale(1);
@@ -1733,6 +2631,468 @@ GM_addStyle(`
     .confirm-no:hover {
         background: #e8e8e8;
         border-color: #999;
+    }
+
+    /* 批量同步本页选择对话框样式 */
+    .sync-batch-page-dialog {
+        max-width: 620px;
+        width: 92%;
+        max-height: 88vh;
+        display: flex;
+        flex-direction: column;
+        padding: 24px !important;
+        border-radius: 12px !important;
+        box-sizing: border-box !important;
+        margin: auto !important;
+        position: relative !important;
+    }
+    .sync-batch-head h3 {
+        margin: 0;
+        font-size: 20px;
+        color: #222;
+        font-weight: 700;
+    }
+    .sync-batch-title-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    .sync-dialog-close {
+        background: none;
+        border: none;
+        font-size: 24px;
+        color: #999;
+        cursor: pointer;
+        padding: 0 4px;
+        line-height: 1;
+        transition: color 0.2s;
+    }
+    .sync-dialog-close:hover {
+        color: #333;
+    }
+    .sync-batch-desc {
+        margin: 6px 0 16px 0;
+        font-size: 13px;
+        color: #666;
+    }
+    .sync-target-tabs {
+        display: flex;
+        gap: 12px;
+        margin-bottom: 14px;
+    }
+    .sync-target-tab {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 14px;
+        border: 2px solid #e5e7eb;
+        border-radius: 8px;
+        cursor: pointer;
+        background: #fafafa;
+        transition: all 0.2s ease;
+        box-sizing: border-box;
+    }
+    .sync-target-tab:hover {
+        border-color: #667eea;
+        background: #f8f9ff;
+    }
+    .sync-target-tab.active {
+        border-color: #667eea;
+        background: #f0f3ff;
+        box-shadow: 0 2px 8px rgba(102, 126, 234, 0.15);
+    }
+    .sync-target-tab .tab-icon {
+        font-size: 22px;
+        flex-shrink: 0;
+    }
+    .sync-target-tab .tab-title {
+        display: block;
+        font-size: 14px;
+        font-weight: 600;
+        color: #333;
+    }
+    .sync-target-tab .tab-desc {
+        display: block;
+        font-size: 11px;
+        color: #888;
+        margin-top: 2px;
+    }
+    .sync-list-toolbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 8px 12px;
+        background: #f3f4f6;
+        border-radius: 6px;
+        font-size: 13px;
+        color: #4b5563;
+        margin-bottom: 8px;
+        box-sizing: border-box;
+    }
+    .sync-toolbar-left {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+    }
+    .sync-select-all-label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        cursor: pointer;
+        font-weight: 600;
+        user-select: none;
+        color: #374151;
+    }
+    .sync-action-link {
+        background: none;
+        border: none;
+        color: #667eea;
+        cursor: pointer;
+        font-size: 12px;
+        padding: 0;
+        text-decoration: underline;
+    }
+    .sync-action-link:hover {
+        color: #4c51bf;
+    }
+    .sync-toolbar-right strong {
+        color: #667eea;
+        font-size: 14px;
+    }
+    .sync-movies-scroll-list {
+        flex: 1;
+        overflow-y: auto;
+        max-height: 300px;
+        min-height: 160px;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 4px;
+        background: #fff;
+        box-sizing: border-box;
+    }
+    .sync-movie-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 10px;
+        border-radius: 6px;
+        border-bottom: 1px solid #f3f4f6;
+        cursor: pointer;
+        transition: background 0.15s;
+        user-select: none;
+    }
+    .sync-movie-item:last-child {
+        border-bottom: none;
+    }
+    .sync-movie-item:hover {
+        background: #f9fafb;
+    }
+    .sync-movie-item.selected {
+        background: #f4f6ff;
+    }
+    .sync-movie-cb-wrap {
+        display: flex;
+        align-items: center;
+        flex-shrink: 0;
+    }
+    .sync-movie-cb {
+        cursor: pointer;
+        width: 15px;
+        height: 15px;
+    }
+    .sync-movie-num {
+        font-size: 11px;
+        color: #9ca3af;
+        min-width: 18px;
+        text-align: center;
+        flex-shrink: 0;
+    }
+    .sync-movie-thumb {
+        width: 30px;
+        height: 42px;
+        object-fit: cover;
+        border-radius: 4px;
+        background: #e5e7eb;
+        flex-shrink: 0;
+    }
+    .sync-movie-thumb.placeholder {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
+    }
+    .sync-movie-details {
+        flex: 1;
+        min-width: 0;
+    }
+    .sync-movie-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: #1f2937;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .sync-movie-meta {
+        font-size: 11px;
+        color: #6b7280;
+        margin-top: 2px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+    .sync-movie-star {
+        color: #f59e0b;
+        letter-spacing: 0.5px;
+    }
+    .sync-movie-score {
+        color: #4b5563;
+    }
+    .sync-movie-unrated {
+        display: inline-block;
+        padding: 1px 6px;
+        background: #f3f4f6;
+        color: #9ca3af;
+        border-radius: 4px;
+        font-size: 11px;
+    }
+    .sync-auto-badge {
+        display: inline-block;
+        padding: 1px 6px;
+        background: #ecfdf5;
+        color: #059669;
+        border: 1px solid #a7f3d0;
+        border-radius: 4px;
+        font-size: 10px;
+        font-weight: 600;
+        margin-left: 6px;
+        vertical-align: middle;
+    }
+    .subject-unselected-hint {
+        color: #d97706;
+        font-size: 12px;
+        font-weight: normal;
+    }
+    .sync-batch-foot {
+        display: flex;
+        justify-content: flex-end;
+        gap: 12px;
+        margin-top: 16px;
+        padding-top: 12px;
+        border-top: 1px solid #e5e7eb;
+    }
+    .sync-btn-cancel {
+        padding: 8px 18px;
+        border: 1px solid #d1d5db;
+        border-radius: 6px;
+        background: #fff;
+        color: #4b5563;
+        font-size: 13px;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    .sync-btn-cancel:hover {
+        background: #f3f4f6;
+    }
+    .sync-btn-submit {
+        padding: 8px 22px;
+        border: none;
+        border-radius: 6px;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: #fff;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s;
+        box-shadow: 0 2px 6px rgba(102, 126, 234, 0.3);
+    }
+    .sync-btn-submit:hover {
+        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        transform: translateY(-1px);
+    }
+    .sync-btn-submit.disabled, .sync-btn-submit:disabled {
+        background: #9ca3af;
+        cursor: not-allowed;
+        box-shadow: none;
+        transform: none;
+    }
+
+    /* 电影详情页单片同步弹窗样式 */
+    .subject-single-sync-dialog {
+        max-width: 460px;
+        width: 90%;
+        padding: 22px !important;
+        border-radius: 12px !important;
+        box-sizing: border-box !important;
+        margin: auto !important;
+        position: relative !important;
+    }
+    .subject-sync-media-card {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        background: #f9fafb;
+        padding: 12px;
+        border-radius: 8px;
+        border: 1px solid #e5e7eb;
+        margin-bottom: 14px;
+    }
+    .subject-sync-thumb {
+        width: 48px;
+        height: 68px;
+        object-fit: cover;
+        border-radius: 4px;
+        background: #e5e7eb;
+        flex-shrink: 0;
+    }
+    .subject-sync-thumb.placeholder {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 24px;
+    }
+    .subject-sync-media-info {
+        flex: 1;
+        min-width: 0;
+    }
+    .subject-sync-media-title {
+        font-size: 15px;
+        font-weight: 700;
+        color: #111827;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .subject-sync-media-meta {
+        font-size: 12px;
+        color: #6b7280;
+        margin-top: 4px;
+    }
+    .subject-sync-media-meta strong {
+        color: #111827;
+    }
+    .subject-sync-rating-selector {
+        margin-bottom: 6px;
+        padding: 12px;
+        background: #f9fafb;
+        border-radius: 8px;
+        border: 1px solid #e5e7eb;
+    }
+    .subject-sync-rating-label {
+        font-size: 13px;
+        font-weight: 600;
+        color: #374151;
+        margin-bottom: 8px;
+        display: flex;
+        justify-content: space-between;
+    }
+    .subject-sync-rating-text {
+        color: #d97706;
+        font-weight: 700;
+    }
+    .subject-rating-stars-bar {
+        display: flex;
+        gap: 6px;
+    }
+    .subject-star-opt {
+        flex: 1;
+        text-align: center;
+        padding: 6px 2px;
+        background: #fff;
+        border: 1px solid #d1d5db;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 11px;
+        line-height: 1.3;
+        color: #4b5563;
+        transition: all 0.15s;
+    }
+    .subject-star-opt:hover {
+        border-color: #f59e0b;
+        color: #f59e0b;
+    }
+    .subject-star-opt.active {
+        background: #fffbeb;
+        border-color: #f59e0b;
+        color: #d97706;
+        font-weight: bold;
+    }
+
+    /* 详情页专属同步按钮 */
+    .subject-info-sync-btn {
+        margin-left: 8px !important;
+        vertical-align: middle;
+        font-size: 11px !important;
+        padding: 2px 8px !important;
+        background: #0091EA !important;
+        color: white !important;
+        border-radius: 3px !important;
+        cursor: pointer !important;
+        border: none !important;
+        transition: background 0.2s !important;
+        line-height: 1.4 !important;
+    }
+    .subject-info-sync-btn:hover {
+        background: #0277BD !important;
+    }
+    .subject-sync-action-wrap {
+        clear: both !important;
+        display: block !important;
+        margin-top: 8px !important;
+        margin-bottom: 4px !important;
+        width: 100% !important;
+        box-sizing: border-box !important;
+    }
+    .subject-action-sync-btn {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: 6px !important;
+        width: 100% !important;
+        max-width: 155px !important;
+        padding: 4px 8px !important;
+        background: #fbfbf8 !important;
+        color: #37a !important;
+        border: 1px solid #d4d8db !important;
+        border-radius: 3px !important;
+        font-size: 12px !important;
+        font-weight: 500 !important;
+        line-height: 1.5 !important;
+        cursor: pointer !important;
+        box-sizing: border-box !important;
+        transition: all 0.2s ease !important;
+        text-decoration: none !important;
+        outline: none !important;
+    }
+    .subject-action-sync-btn:hover {
+        background: #ffffff !important;
+        border-color: #e2b616 !important;
+        box-shadow: 0 1px 4px rgba(226, 182, 22, 0.2) !important;
+    }
+    .subject-action-sync-btn:active {
+        background: #f3f3ee !important;
+        transform: translateY(1px) !important;
+    }
+    .subject-sync-imdb-badge {
+        display: inline-block !important;
+        background: #f5c518 !important;
+        color: #000000 !important;
+        font-family: Impact, "Arial Black", Arial, Helvetica, sans-serif !important;
+        font-size: 10px !important;
+        font-weight: 800 !important;
+        padding: 0 4px !important;
+        border-radius: 2px !important;
+        line-height: 14px !important;
+        letter-spacing: 0.2px !important;
+    }
+    .subject-sync-btn-label {
+        font-size: 12px !important;
+        color: #3377aa !important;
+        font-weight: 500 !important;
+    }
+    .subject-action-sync-btn:hover .subject-sync-btn-label {
+        color: #111111 !important;
     }
     
     .sync-imdb-btn {
@@ -2247,204 +3607,184 @@ if (location.hostname == 'movie.douban.com' || location.hostname == 'search.doub
         }
     }
     
-    // 在"我看过的电影"页面和列表页面添加同步按钮
-    if (location.pathname.includes('/mine') || 
-        location.pathname.includes('/collect') || 
-        location.pathname.includes('/wish') || 
-        location.pathname.includes('/people/') ||
-        (location.pathname.includes('/search') && !location.pathname.includes('/subject_search')) ||
-        location.pathname.includes('/tag/')) {
-        // 等待页面加载完成
-        setTimeout(function() {
-            console.log('[Douban to IMDb] 脚本开始执行');
-            console.log('[Douban to IMDb] 当前URL:', location.href);
-            
-            // 尝试多种选择器
-            let $items = $('#content .article .item');
-            if ($items.length === 0) {
-                $items = $('.grid-view .item');
+    // 在"我看过的电影"、"我想看的电影"等真实列表页面添加同步按钮
+    function initMovieListPage() {
+        const path = location.pathname;
+        const search = location.search;
+
+        // 精确判定：必须是具体的电影分类列表页，排除个人主页 overview 概览页
+        const isCollect = path.includes('/collect') || search.includes('status=collect');
+        const isWish = path.includes('/wish') || search.includes('status=wish');
+        const isDo = path.includes('/do') || search.includes('status=do');
+        const isTagOrDoulist = path.includes('/tag/') || path.includes('/doulist/');
+        const isNormalSearch = (path.includes('/search') && !path.includes('/subject_search'));
+
+        const isListPage = isCollect || isWish || isDo || isTagOrDoulist || isNormalSearch;
+
+        // 如果不是具体分类列表（例如单纯的 /mine 概览页，或 /people/xxx/ 个人主页未带分类），直接退出，绝不误弹错误提示！
+        if (!isListPage) {
+            return;
+        }
+
+        // 极速就绪检测：避免硬性死等 2000ms，通常在 50~100ms 即可立即加载
+        let checkAttempts = 0;
+        const maxChecks = 20; // 20 * 50ms = 最多等待 1 秒
+        const checkTimer = setInterval(function() {
+            checkAttempts++;
+            let $items = $('#content .article .item, .grid-view .item, .list-view .item, #content .item');
+            if ($items.length > 0) {
+                clearInterval(checkTimer);
+                setupMovieListPage($items, isWish);
+            } else if (checkAttempts >= maxChecks) {
+                clearInterval(checkTimer);
+                // 达到最大尝试次数仍无项目，静默退出，严禁弹出错误 Toast 骚扰用户
+                console.log('[Douban to IMDb] 当前列表未检测到电影项目');
             }
-            if ($items.length === 0) {
-                $items = $('.list-view .item');
-            }
-            if ($items.length === 0) {
-                $items = $('#content .item');
-            }
-            
-            console.log('[Douban to IMDb] 找到电影数量:', $items.length);
-            
-            if ($items.length === 0) {
-                console.error('[Douban to IMDb] 未找到电影列表，请检查页面结构');
-                showToast('未找到电影列表', 'error');
-                return;
-            }
-            
-            $items.each(function(index) {
-                const $item = $(this);
-                const $title = $item.find('li.title a, .info h2 a, .title a').first();
-                
-                if ($title.length) {
-                    const movieUrl = $title.attr('href');
-                    let rating = 5; // 默认5星
-                    
-                    // 查找评分 span (rating1-t 到 rating5-t)
-                    const $ratingSpan = $item.find('span[class*="rating"]');
-                    if ($ratingSpan.length) {
-                        const ratingClass = $ratingSpan.attr('class');
-                        const match = ratingClass.match(/rating(\d)-t/);
-                        if (match) {
-                            rating = parseInt(match[1]);
-                        }
-                    }
-                    
-                    const movieTitle = $title.find('em').text() || $title.text();
-                    console.log('[Douban to IMDb] 处理电影 #' + (index + 1) + ':', movieTitle, '评分:', rating + '星');
-                    
-                    // 检查是否已添加按钮
-                    if ($title.parent().find('.sync-imdb-btn').length > 0) {
-                        console.log('[Douban to IMDb] 按钮已存在，跳过');
-                        return;
-                    }
-                    
-                    const $btn = $('<button class="sync-imdb-btn">同步(' + rating + '★)</button>');
-                    $title.parent().append($btn);
-                    console.log('[Douban to IMDb] 按钮已添加');
-                    
-                    $btn.on('click', function(e) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        if ($btn.hasClass('syncing')) return;
-                        
-                        // 显示同步目标选择对话框
-                        showSyncTargetDialog(function(target) {
-                            if (!target) return; // 用户取消
-                            
-                            console.log('[Douban to IMDb] 开始同步:', movieTitle, '评分:', rating + '星', '目标:', target);
-                            $btn.addClass('syncing').text('同步中...');
-                            
-                            // 在后台打开电影详情页，并通过 hash 传递评分和目标信息
-                            const syncUrl = movieUrl + '#sync-' + rating + '-' + target;
-                            console.log('[Douban to IMDb] 打开详情页:', syncUrl);
-                            
-                            // 后台打开详情页
-                            const a = document.createElement('a');
-                            a.href = syncUrl;
-                            a.target = '_blank';
-                            a.rel = 'noopener noreferrer';
-                            
-                            const evt = new MouseEvent('click', {
-                                ctrlKey: true,
-                                metaKey: true,
-                                bubbles: true,
-                                cancelable: true
-                            });
-                            a.dispatchEvent(evt);
-                            
-                            const targetText = target === CONFIG.SYNC_TARGET.RATING ? '已看(评分)' : '想看(Watchlist)';
-                            showToast(`正在同步到${targetText}: ${movieTitle} (${rating * 2}分)`, 'success');
-                            
-                            setTimeout(() => {
-                                $btn.removeClass('syncing').addClass('synced').text('已同步✓');
-                                updateFloatButtonCount();
-                            }, CONFIG.BUTTON_STATE_UPDATE_DELAY);
-                        });
-                    });
-                }
-            });
-            
-            console.log('[Douban to IMDb] 脚本执行完成');
-            
-            // 添加悬浮批量同步按钮
-            addFloatButton();
-            
-            // 如果URL带有 #auto-sync 标记，自动开始同步（不显示进度弹窗）
-            if (location.hash.startsWith('#auto-sync')) {
-                console.log('[Douban to IMDb] 检测到自动同步标记，这是子页面，不显示进度弹窗');
-                
-                // 从 hash 中提取目标类型
-                const hashParts = location.hash.split('-');
-                const target = hashParts[2] || CONFIG.SYNC_TARGET.RATING;
-                // 不再修改全局变量
-                
-                // 生成批次ID（用于标签页检测）
-                const batchId = 'batch-auto-' + Date.now();
-                
-                setTimeout(() => {
-                    // 收集电影信息并自动同步
-                    const $syncButtons = $('.sync-imdb-btn').not('.syncing, .synced');
-                    const openedTabs = [];
-                    
-                    $syncButtons.each(function(index) {
-                        const $btn = $(this);
-                        setTimeout(() => {
-                            if (!$btn.hasClass('syncing') && !$btn.hasClass('synced')) {
-                                const movieTitle = $btn.parent().find('a em').text() || $btn.parent().find('a').text();
-                                console.log('[Douban to IMDb] 自动同步:', movieTitle, '目标:', target);
-                                $btn.addClass('syncing').text('同步中...');
-                                
-                                // 获取电影信息
-                                const movieUrl = $btn.parent().find('a').attr('href');
-                                const $ratingSpan = $btn.closest('.item').find('span[class*="rating"]');
-                                let rating = 5;
-                                if ($ratingSpan.length) {
-                                    const ratingClass = $ratingSpan.attr('class');
-                                    const match = ratingClass.match(/rating(\d)-t/);
-                                    if (match) {
-                                        rating = parseInt(match[1]);
-                                    }
-                                }
-                                
-                                const syncUrl = movieUrl + '#sync-' + rating + '-' + target + '-' + batchId + '-' + index;
-                                const newTab = window.open(syncUrl, '_blank');
-                                
-                                // 立即让主窗口重新获得焦点（实现后台打开效果）
-                                setTimeout(() => {
-                                    window.focus();
-                                }, 100);
-                                
-                                if (newTab) {
-                                    openedTabs.push({
-                                        tab: newTab,
-                                        button: $btn,
-                                        startTime: Date.now()
-                                    });
-                                }
-                            }
-                        }, index * CONFIG.MOVIE_SYNC_INTERVAL);
-                    });
-                    
-                    // 检查标签页状态
-                    const checkInterval = setInterval(() => {
-                        openedTabs.forEach((item, i) => {
-                            if (item.tab && item.tab.closed) {
-                                // 这里的 batchId 是子页面自己生成的，无法获取详情页的结果
-                                // 所以子页面的检测保持简单，只标记为已同步
-                                // 实际的成功/失败判断由主页面的批量同步逻辑处理
-                                item.button.removeClass('syncing').addClass('synced').text('已同步✓');
-                                openedTabs.splice(i, 1);
-                            }
-                        });
-                        
-                        // 所有标签页都关闭后，标记页面完成（不自动关闭）
-                        if (openedTabs.length === 0 && $syncButtons.length > 0) {
-                            clearInterval(checkInterval);
-                            console.log('[Douban to IMDb] 子页面同步完成，标记为已完成');
-                            // 在页面标题中添加完成标记，让主页面可以检测
-                            document.title = '[已完成] ' + document.title;
-                            // 不自动关闭，等待主页面关闭
-                        }
-                    }, 1000);
-                }, CONFIG.AUTO_SYNC_START_DELAY);
-            }
-        }, CONFIG.PAGE_LOAD_DELAY);
+        }, 50);
     }
 
-    // 在电影详情页添加 IMDb 链接
+    function setupMovieListPage($items, isWish) {
+        console.log('[Douban to IMDb] 快速初始化电影列表，数量:', $items.length);
+
+        $items.each(function(index) {
+            const $item = $(this);
+            const $title = $item.find('li.title a, .info h2 a, .title a').first();
+
+            if ($title.length) {
+                if ($title.parent().find('.sync-imdb-btn').length > 0) {
+                    return;
+                }
+
+                const movieUrl = $title.attr('href');
+                const movieTitle = $title.find('em').text() || $title.text().trim();
+                const rating = extractMovieRatingFromItem($item); // 智能提取评分：1~5，未评分为 null
+
+                // 按钮文案：有实际评分显示“同步(4★)”，无评分在想看页显示“同步(想看)”，其他无评分显示“同步”
+                let btnText = '同步';
+                if (rating) {
+                    btnText = '同步(' + rating + '★)';
+                } else if (isWish) {
+                    btnText = '同步(想看)';
+                } else {
+                    btnText = '同步';
+                }
+
+                const $btn = $('<button type="button" class="sync-imdb-btn">' + btnText + '</button>');
+                $title.parent().append($btn);
+
+                $btn.on('click', function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if ($btn.hasClass('syncing')) return;
+
+                    showSyncTargetDialog(function(target) {
+                        if (!target) return; // 用户取消
+
+                        const finalRating = (target === CONFIG.SYNC_TARGET.RATING && !rating) ? 5 : (rating || 5);
+
+                        console.log('[Douban to IMDb] 开始同步:', movieTitle, '评分:', finalRating + '星', '目标:', target);
+                        $btn.addClass('syncing').text('同步中...');
+
+                        const syncUrl = movieUrl + '#sync-' + finalRating + '-' + target;
+                        const a = document.createElement('a');
+                        a.href = syncUrl;
+                        a.target = '_blank';
+                        a.rel = 'noopener noreferrer';
+
+                        const evt = new MouseEvent('click', {
+                            ctrlKey: true,
+                            metaKey: true,
+                            bubbles: true,
+                            cancelable: true
+                        });
+                        a.dispatchEvent(evt);
+
+                        const targetText = target === CONFIG.SYNC_TARGET.RATING ? `已看(评分: ${finalRating * 2}分)` : '想看(Watchlist)';
+                        showToast(`正在同步到${targetText}: ${movieTitle}`, 'success');
+
+                        setTimeout(() => {
+                            $btn.removeClass('syncing').addClass('synced').text('已同步✓');
+                            updateFloatButtonCount();
+                        }, CONFIG.BUTTON_STATE_UPDATE_DELAY);
+                    });
+                });
+            }
+        });
+
+        // 添加右侧悬浮批量同步按钮
+        addFloatButton();
+
+        // 自动同步子页面检测与处理
+        if (location.hash.startsWith('#auto-sync')) {
+            console.log('[Douban to IMDb] 检测到自动同步标记，这是子页面');
+            const hashParts = location.hash.split('-');
+            const target = hashParts[2] || CONFIG.SYNC_TARGET.RATING;
+            const batchId = 'batch-auto-' + Date.now();
+
+            setTimeout(() => {
+                const $syncButtons = $('.sync-imdb-btn').not('.syncing, .synced, .subject-action-sync-btn');
+                const openedTabs = [];
+
+                $syncButtons.each(function(index) {
+                    const $btn = $(this);
+                    setTimeout(() => {
+                        if (!$btn.hasClass('syncing') && !$btn.hasClass('synced')) {
+                            const movieTitle = $btn.parent().find('a em').text() || $btn.parent().find('a').text();
+                            $btn.addClass('syncing').text('同步中...');
+
+                            const movieUrl = $btn.parent().find('a').attr('href');
+                            const $parentItem = $btn.closest('.item');
+                            const itemRating = extractMovieRatingFromItem($parentItem) || 5;
+
+                            const syncUrl = movieUrl + '#sync-' + itemRating + '-' + target + '-' + batchId + '-' + index;
+                            const newTab = window.open(syncUrl, '_blank');
+
+                            setTimeout(() => {
+                                window.focus();
+                            }, 100);
+
+                            if (newTab) {
+                                openedTabs.push({
+                                    tab: newTab,
+                                    button: $btn,
+                                    startTime: Date.now()
+                                });
+                            }
+                        }
+                    }, index * CONFIG.MOVIE_SYNC_INTERVAL);
+                });
+
+                const checkInterval = setInterval(() => {
+                    openedTabs.forEach((item, i) => {
+                        if (item.tab && item.tab.closed) {
+                            item.button.removeClass('syncing').addClass('synced').text('已同步✓');
+                            openedTabs.splice(i, 1);
+                        }
+                    });
+
+                    if (openedTabs.length === 0 && $syncButtons.length > 0) {
+                        clearInterval(checkInterval);
+                        console.log('[Douban to IMDb] 子页面同步完成');
+                        document.title = '[已完成] ' + document.title;
+                    }
+                }, 1000);
+            }, CONFIG.AUTO_SYNC_START_DELAY);
+        }
+    }
+
+    // 启动列表页检测
+    initMovieListPage();
+
+    // 在电影详情页添加 IMDb 链接与同步按钮
     if (location.pathname.includes('/subject/')) {
-        // 等待页面加载完成后添加 IMDb 链接
+        // 等待页面加载完成后添加 IMDb 链接与同步按钮
         setTimeout(function() {
             addImdbLinkBack();
+            addSubjectPageSyncButtons();
         }, 500);
+        setTimeout(function() {
+            addSubjectPageSyncButtons();
+        }, 1500);
     }
     
     // 在电影详情页自动同步（从列表页点击按钮跳转过来的）
@@ -2676,6 +4016,7 @@ if (location.hostname == 'www.imdb.com') {
             let $doubanBtn = $('<li role="presentation" class="ipc-inline-list__item"><a target="_blank" href="' + doubanLink + '" class="ipc-link ipc-link--baseAlt ipc-link--inherit-color douban-preview-link" data-imdb-id="' + id + '" data-testid="hero-subnav-bar-imdb-pro-link">Douban</a></li>');
             $('ul[data-testid="hero-subnav-bar-topic-links"]').append($doubanBtn);
             bindHoverPreview($doubanBtn.find('a')[0], 'douban', function() { return id; });
+            preloadPreview('douban', id);
         }, 1000);
 
         // 解析 hash: #10-watchlist-batch-1770416024180-1-30455615
@@ -2858,6 +4199,7 @@ if (location.hostname == 'www.imdb.com') {
                     let $doubanBtn2 = $('<li role="presentation" class="ipc-inline-list__item"><a href="https://movie.douban.com/subject_search?search_text=' + id + '&cat=1002&from_imdb=true" class="ipc-link ipc-link--baseAlt ipc-link--inherit-color douban-preview-link" data-imdb-id="' + id + '">Douban</a></li>');
                     $('ul[data-testid="hero-subnav-bar-topic-links"]').append($doubanBtn2);
                     bindHoverPreview($doubanBtn2.find('a')[0], 'douban', function() { return id; });
+                    preloadPreview('douban', id);
                 }, CONFIG.IMDB_RATE_SUBMIT_DELAY);
             }
         }
