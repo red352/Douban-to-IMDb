@@ -1,0 +1,175 @@
+
+    .douban-toast {
+        position: fixed;
+        bottom: 30px;
+        right: 30px;
+        padding: 15px 25px;
+        border-radius: 8px;
+        color: white;
+        font-size: 14px;
+        z-index: 99999;
+        opacity: 0;
+        transform: translateY(20px);
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        max-width: 300px;
+    }
+    .douban-toast.show {
+        opacity: 1;
+        transform: translateY(0);
+    }
+    .douban-toast.toast-success {
+        background-color: #52c41a;
+    }
+    .douban-toast.toast-error {
+        background-color: #ff4d4f;
+    }
+    
+    /* 同步目标选择对话框样式 */
+    .sync-target-dialog-overlay {
+        position: fixed !important;
+        top: 0 !important;
+        left: 0 !important;
+        right: 0 !important;
+        bottom: 0 !important;
+        width: 100vw !important;
+        height: 100vh !important;
+        width: 100% !important;
+        height: 100% !important;
+        background: rgba(0, 0, 0, 0.6) !important;
+        z-index: 99999999 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        opacity: 0;
+        transition: opacity 0.25s ease;
+        box-sizing: border-box !important;
+        margin: 0 !important;
+        padding: 20px !important;
+        overflow-y: auto !important;
+    }
+    .sync-target-dialog-overlay.show {
+        opacity: 1;
+    }
+    .sync-target-dialog {
+        background: white !important;
+        border-radius: 12px !important;
+        padding: 30px !important;
+        max-width: 500px;
+        width: 90%;
+        box-shadow: 0 16px 48px rgba(0,0,0,0.3) !important;
+        transform: scale(0.92);
+        transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1) !important;
+        margin: auto !important;
+        box-sizing: border-box !important;
+        position: relative !important;
+    }
+    .sync-target-dialog-overlay.show .sync-target-dialog {
+        transform: scale(1);
+    }
+    .sync-target-dialog h3 {
+        margin: 0 0 10px 0;
+        font-size: 24px;
+        color: #333;
+    }
+    .sync-target-dialog p {
+        margin: 0 0 20px 0;
+        color: #666;
+        font-size: 14px;
+    }
+    .sync-target-options {
+        display: flex;
+        gap: 15px;
+        margin-bottom: 20px;
+    }
+    .sync-target-option {
+        flex: 1;
+        padding: 20px;
+        border: 2px solid #e0e0e0;
+        border-radius: 8px;
+        background: white;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+    }
+    .sync-target-option:hover {
+        border-color: #667eea;
+        background: #f8f9ff;
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.2);
+    }
+    .sync-target-option .option-icon {
+        font-size: 32px;
+    }
+    .sync-target-option .option-title {
+        font-size: 16px;
+        font-weight: bold;
+        color: #333;
+    }
+    .sync-target-option .option-desc {
+        font-size: 12px;
+        color: #999;
+        text-align: center;
+    }
+    .sync-target-cancel {
+        width: 100%;
+        padding: 12px;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        background: white;
+        color: #666;
+        cursor: pointer;
+        font-size: 14px;
+        transition: all 0.3s ease;
+    }
+    .sync-target-cancel:hover {
+        background: #f5f5f5;
+        border-color: #999;
+    }
+    
+    /* 确认对话框样式 */
+    .confirm-dialog {
+        max-width: 450px;
+    }
+    .confirm-message {
+        font-size: 15px;
+        line-height: 1.6;
+        color: #333;
+        margin-bottom: 25px;
+        white-space: pre-line;
+    }
+    .confirm-buttons {
+        display: flex;
+        gap: 10px;
+    }
+    .confirm-btn {
+        flex: 1;
+        padding: 12px;
+        border: none;
+        border-radius: 6px;
+        font-size: 14px;
+        font-weight: bold;
+        cursor: pointer;
+        transition: all 0.3s ease;
+    }
+    .confirm-yes {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+    }
+    .confirm-yes:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+    }
+    .confirm-no {
+        background: #f5f5f5;
+        color: #666;
+        border: 1px solid #ddd;
+    }
+    .confirm-no:hover {
+        background: #e8e8e8;
+        border-color: #999;
+    }
+

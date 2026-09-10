@@ -1,0 +1,22 @@
+// ==UserScript==
+// @name         Douban to IMDb
+// @version      2026.09.10
+// @author       ryen
+// @description  Sync Douban movie ratings to IMDb automatically - 自动同步豆瓣电影评分到IMDb
+// @icon         https://pic1.zhimg.com/50/088ce5111d2958266db8675dfdba226c_720w.jpg
+// @include      http*://www.imdb.com/*
+// @include      http*://movie.douban.com/*
+// @include      http*://search.douban.com/* 
+// @copyright    2019+
+// @run-at       document-start
+// @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// @connect      www.imdb.com
+// @connect      imdb.com
+// @connect      *.imdb.com
+// @connect      v3.sg.media-imdb.com
+// @connect      movie.douban.com
+// @connect      search.douban.com
+// @connect      doubanio.com
+// @require      https://cdnjs.cloudflare.com/ajax/libs/jquery/3.1.1/jquery.min.js
+// ==/UserScript==

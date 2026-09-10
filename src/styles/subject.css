@@ -1,0 +1,208 @@
+    /* 电影详情页单片同步弹窗样式 */
+    .subject-single-sync-dialog {
+        max-width: 460px;
+        width: 90%;
+        padding: 22px !important;
+        border-radius: 12px !important;
+        box-sizing: border-box !important;
+        margin: auto !important;
+        position: relative !important;
+    }
+    .subject-sync-media-card {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        background: #f9fafb;
+        padding: 12px;
+        border-radius: 8px;
+        border: 1px solid #e5e7eb;
+        margin-bottom: 14px;
+    }
+    .subject-sync-thumb {
+        width: 48px;
+        height: 68px;
+        object-fit: cover;
+        border-radius: 4px;
+        background: #e5e7eb;
+        flex-shrink: 0;
+    }
+    .subject-sync-thumb.placeholder {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 24px;
+    }
+    .subject-sync-media-info {
+        flex: 1;
+        min-width: 0;
+    }
+    .subject-sync-media-title {
+        font-size: 15px;
+        font-weight: 700;
+        color: #111827;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .subject-sync-media-meta {
+        font-size: 12px;
+        color: #6b7280;
+        margin-top: 4px;
+    }
+    .subject-sync-media-meta strong {
+        color: #111827;
+    }
+    .subject-sync-rating-selector {
+        margin-bottom: 6px;
+        padding: 12px;
+        background: #f9fafb;
+        border-radius: 8px;
+        border: 1px solid #e5e7eb;
+    }
+    .subject-sync-rating-label {
+        font-size: 13px;
+        font-weight: 600;
+        color: #374151;
+        margin-bottom: 8px;
+        display: flex;
+        justify-content: space-between;
+    }
+    .subject-sync-rating-text {
+        color: #d97706;
+        font-weight: 700;
+    }
+    .subject-rating-stars-bar {
+        display: flex;
+        gap: 6px;
+    }
+    .subject-star-opt {
+        flex: 1;
+        text-align: center;
+        padding: 6px 2px;
+        background: #fff;
+        border: 1px solid #d1d5db;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 11px;
+        line-height: 1.3;
+        color: #4b5563;
+        transition: all 0.15s;
+    }
+    .subject-star-opt:hover {
+        border-color: #f59e0b;
+        color: #f59e0b;
+    }
+    .subject-star-opt.active {
+        background: #fffbeb;
+        border-color: #f59e0b;
+        color: #d97706;
+        font-weight: bold;
+    }
+
+    /* 详情页专属同步按钮 */
+    .subject-info-sync-btn {
+        margin-left: 8px !important;
+        vertical-align: middle;
+        font-size: 11px !important;
+        padding: 2px 8px !important;
+        background: #0091EA !important;
+        color: white !important;
+        border-radius: 3px !important;
+        cursor: pointer !important;
+        border: none !important;
+        transition: background 0.2s !important;
+        line-height: 1.4 !important;
+    }
+    .subject-info-sync-btn:hover {
+        background: #0277BD !important;
+    }
+    .subject-sync-action-wrap {
+        clear: both !important;
+        display: block !important;
+        margin-top: 8px !important;
+        margin-bottom: 4px !important;
+        width: 100% !important;
+        box-sizing: border-box !important;
+    }
+    .subject-action-sync-btn {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: 6px !important;
+        width: 100% !important;
+        max-width: 155px !important;
+        padding: 4px 8px !important;
+        background: #fbfbf8 !important;
+        color: #37a !important;
+        border: 1px solid #d4d8db !important;
+        border-radius: 3px !important;
+        font-size: 12px !important;
+        font-weight: 500 !important;
+        line-height: 1.5 !important;
+        cursor: pointer !important;
+        box-sizing: border-box !important;
+        transition: all 0.2s ease !important;
+        text-decoration: none !important;
+        outline: none !important;
+    }
+    .subject-action-sync-btn:hover {
+        background: #ffffff !important;
+        border-color: #e2b616 !important;
+        box-shadow: 0 1px 4px rgba(226, 182, 22, 0.2) !important;
+    }
+    .subject-action-sync-btn:active {
+        background: #f3f3ee !important;
+        transform: translateY(1px) !important;
+    }
+    .subject-sync-imdb-badge {
+        display: inline-block !important;
+        background: #f5c518 !important;
+        color: #000000 !important;
+        font-family: Impact, "Arial Black", Arial, Helvetica, sans-serif !important;
+        font-size: 10px !important;
+        font-weight: 800 !important;
+        padding: 0 4px !important;
+        border-radius: 2px !important;
+        line-height: 14px !important;
+        letter-spacing: 0.2px !important;
+    }
+    .subject-sync-btn-label {
+        font-size: 12px !important;
+        color: #3377aa !important;
+        font-weight: 500 !important;
+    }
+    .subject-action-sync-btn:hover .subject-sync-btn-label {
+        color: #111111 !important;
+    }
+    
+    .sync-imdb-btn {
+        display: inline-block;
+        margin-left: 10px;
+        padding: 4px 10px;
+        background: #0091EA;
+        color: white;
+        border-radius: 3px;
+        font-size: 12px;
+        cursor: pointer;
+        border: none;
+        transition: background 0.3s;
+    }
+    .sync-imdb-btn:hover {
+        background: #0277BD;
+    }
+    .sync-imdb-btn.syncing {
+        background: #999;
+        cursor: not-allowed;
+    }
+    .sync-imdb-btn.synced {
+        background: #52c41a;
+        cursor: default;
+    }
+    .sync-imdb-btn.sync-failed {
+        background: #ff4d4f;
+        cursor: pointer;
+    }
+    .sync-imdb-btn.sync-failed:hover {
+        background: #ff7875;
+    }
+    

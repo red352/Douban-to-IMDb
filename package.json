@@ -1,0 +1,17 @@
+{
+  "name": "douban-to-imdb",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:check": "node scripts/build.mjs --check",
+    "check": "node scripts/check-source.mjs && npm run build:check && node -c douban.js",
+    "test": "node --test tests/core.test.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "acorn": "^8.18.0",
+    "esbuild": "^0.28.2",
+    "eslint-scope": "^9.1.2"
+  }
+}

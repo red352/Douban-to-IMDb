@@ -1,0 +1,192 @@
+    .media-preview-card {
+        position: fixed;
+        z-index: 9999999;
+        width: 330px;
+        background: #ffffff;
+        color: #1a1a1a;
+        border-radius: 10px;
+        box-shadow: 0 12px 36px rgba(0, 0, 0, 0.2), 0 0 1px rgba(0, 0, 0, 0.15);
+        padding: 12px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        font-size: 13px;
+        line-height: 1.45;
+        opacity: 0;
+        visibility: hidden;
+        transform: translateY(6px);
+        transition: opacity 0.2s ease, transform 0.2s ease, visibility 0.2s;
+        pointer-events: auto;
+        border: 1px solid rgba(0, 0, 0, 0.08);
+        box-sizing: border-box;
+    }
+
+    .media-preview-card * {
+        box-sizing: border-box;
+    }
+
+    .media-preview-card.mpc-visible {
+        opacity: 1;
+        visibility: visible;
+        transform: translateY(0);
+    }
+
+    .mpc-loading, .mpc-error {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 24px 10px;
+        color: #666;
+        font-size: 12px;
+    }
+
+    .mpc-spinner {
+        width: 16px;
+        height: 16px;
+        border: 2px solid #e0e0e0;
+        border-top-color: #3377aa;
+        border-radius: 50%;
+        animation: mpc-spin 0.7s linear infinite;
+    }
+
+    @keyframes mpc-spin {
+        to { transform: rotate(360deg); }
+    }
+
+    .mpc-content {
+        display: flex;
+        gap: 12px;
+    }
+
+    .mpc-poster-wrap {
+        flex-shrink: 0;
+        width: 80px;
+        height: 116px;
+        border-radius: 6px;
+        overflow: hidden;
+        background: #eee;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+    }
+
+    .mpc-poster {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+    }
+
+    .mpc-info {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+    }
+
+    .mpc-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 2px;
+        width: 100%;
+        min-width: 0;
+    }
+
+    .mpc-badge {
+        display: inline-block;
+        flex-shrink: 0;
+        white-space: nowrap;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        line-height: 1.2;
+        height: fit-content;
+        box-sizing: border-box;
+    }
+
+    .mpc-badge.imdb {
+        background: #f5c518;
+        color: #000000;
+    }
+
+    .mpc-badge.douban {
+        background: #007722;
+        color: #ffffff;
+    }
+
+    .mpc-title {
+        font-size: 14px;
+        font-weight: 600;
+        color: #111;
+        margin: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        min-width: 0;
+        flex: 1;
+    }
+
+    .mpc-subtitle {
+        font-size: 11px;
+        color: #777;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        margin-bottom: 4px;
+        min-width: 0;
+        width: 100%;
+    }
+
+    .mpc-rating-row {
+        display: flex;
+        align-items: baseline;
+        gap: 4px;
+        margin-bottom: 4px;
+    }
+
+    .mpc-star {
+        color: #f5a623;
+        font-size: 14px;
+    }
+
+    .mpc-rating-score {
+        font-size: 15px;
+        font-weight: 700;
+        color: #e09015;
+    }
+
+    .mpc-rating-max {
+        font-size: 11px;
+        color: #999;
+    }
+
+.mpc-rating-votes {
+        font-size: 11px;
+        color: #888;
+        margin-left: 4px;
+}
+
+.mpc-notice {
+    margin: 10px 0 0;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #5e6d63;
+}
+
+    .mpc-meta {
+        font-size: 11px;
+        color: #666;
+        margin-bottom: 6px;
+    }
+
+    .mpc-description {
+        font-size: 11px;
+        color: #555;
+        line-height: 1.4;
+        margin: 0;
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+    }
